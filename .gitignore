@@ -20,11 +20,6 @@ build.ninja
 *.exe
 *.out
 
-# External dependencies
-external/Enzyme/
-external/eigen/
-external/optim/
-
 # Windows / WSL metadata
 *:Zone.Identifier
 Zone.Identifier
