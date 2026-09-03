@@ -5,7 +5,7 @@
 
 namespace NLModeling
 {
-	constexpr static int NumLayers = 5;
+	constexpr static int NumLayers = 6;
 	constexpr static int NLOrder = 4;
 	constexpr static int FiltOrder = 4;
 	constexpr static int NumParams = NumLayers * NLOrder * (FiltOrder * 2 + 1);
@@ -13,6 +13,25 @@ namespace NLModeling
 	{
 		float ks[NumLayers][NLOrder][FiltOrder];
 		float gs[NumLayers][NLOrder][FiltOrder + 1];
+		void InitVecDirect(float* out)
+		{
+			int p = 0;
+			for (int layer = 0; layer < NumLayers; ++layer)
+			{
+				for (int nl = 0; nl < NLOrder; ++nl)
+				{
+					for (int i = 0; i < FiltOrder; ++i)
+						out[p++] = 0.0f;
+					for (int i = 0; i < FiltOrder + 1; ++i)
+					{
+						if (nl == 0 && i == FiltOrder)
+							out[p++] = 1.0f;
+						else
+							out[p++] = 1e-6f;
+					}
+				}
+			}
+		}
 		void ParamsToVec(float* out) const
 		{
 			int p = 0;
@@ -87,6 +106,287 @@ namespace NLModeling
 					}
 					y = y0;
 				}
+				out[i] = y;
+			}
+		}
+	};
+}
+#pragma once
+
+#include <cmath>
+
+namespace NLModelingGRU
+{
+	constexpr static int HiddenSize = 4;
+	constexpr static int NumLayers = 4;
+
+	constexpr static int GateParams = HiddenSize + HiddenSize * HiddenSize + HiddenSize;
+	constexpr static int NumParams = GateParams * 3 + HiddenSize + 1;
+
+	constexpr static float InputScale = 80.0f;
+
+	constexpr static float InputWeightRange = 4.0f;
+	constexpr static float RecurrentWeightRange = 1.0f;
+	constexpr static float BiasRange = 6.0f;
+	constexpr static float OutputWeightRange = 4.0f;
+	constexpr static float OutputBiasRange = 2.0f;
+
+	/*
+	template<typename Sample>
+	static inline Sample Sigmoid(Sample x)
+	{
+		return Sample(0.5) * (std::tanh(Sample(0.5) * x) + Sample(1));
+	}
+	template<typename Sample>
+	static inline Sample Tanh(Sample x)
+	{
+		return std::tanh(x);
+	}*/
+	template<typename Sample>
+	static inline Sample Clip(Sample x, Sample lo, Sample hi)
+	{
+		return x < lo ? lo : (x > hi ? hi : x);
+	}
+	template<typename Sample>
+	static inline Sample Tanh(Sample x)
+	{
+		return Clip(x, Sample(-1), Sample(1));
+	}
+	template<typename Sample>
+	static inline Sample Sigmoid(Sample x)
+	{
+		return Clip(Sample(0.5) + Sample(0.25) * x, Sample(0), Sample(1));
+	}
+	/*
+	static inline float Tanh(float x)
+	{
+		return x / sqrtf(1.0f + x * x);
+	}
+	static inline float Sigmoid(float x)
+	{
+		return 0.5f * (1.0f + x / sqrtf(4.0f + x * x));
+	}*/
+
+	static inline float MapParam(float x, float range)
+	{
+		return range * std::tanh(x);
+	}
+
+	static inline float UnmapParam(float x, float range)
+	{
+		return std::atanh(x / range);
+	}
+
+	struct NLModelParams
+	{
+		float wz[HiddenSize];
+		float uz[HiddenSize][HiddenSize];
+		float bz[HiddenSize];
+
+		float wr[HiddenSize];
+		float ur[HiddenSize][HiddenSize];
+		float br[HiddenSize];
+
+		float wh[HiddenSize];
+		float uh[HiddenSize][HiddenSize];
+		float bh[HiddenSize];
+
+		float wo[HiddenSize];
+		float bo;
+
+		void InitVecDirect(float* out)
+		{
+			static_assert((HiddenSize & 1) == 0);
+
+			int p = 0;
+
+			for (int i = 0; i < HiddenSize; ++i)
+				out[p++] = UnmapParam(0.0f, InputWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				for (int j = 0; j < HiddenSize; ++j)
+					out[p++] = UnmapParam(0.0f, RecurrentWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				out[p++] = UnmapParam(-2.0f, BiasRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				out[p++] = UnmapParam(0.0f, InputWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				for (int j = 0; j < HiddenSize; ++j)
+					out[p++] = UnmapParam(0.0f, RecurrentWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				out[p++] = UnmapParam(0.0f, BiasRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+			{
+				float w = 0.7f + 0.2f * (float)(i / 2);
+				out[p++] = UnmapParam(w, InputWeightRange);
+			}
+
+			for (int i = 0; i < HiddenSize; ++i)
+				for (int j = 0; j < HiddenSize; ++j)
+					out[p++] = UnmapParam(0.0f, RecurrentWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				out[p++] = UnmapParam(0.0f, BiasRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+			{
+				float w = (i & 1) ? -0.05f : 0.05f;
+				out[p++] = UnmapParam(w, OutputWeightRange);
+			}
+
+			out[p++] = UnmapParam(0.0f, OutputBiasRange);
+		}
+
+		void ParamsToVec(float* out) const
+		{
+			int p = 0;
+
+			for (int i = 0; i < HiddenSize; ++i)
+				out[p++] = UnmapParam(wz[i], InputWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				for (int j = 0; j < HiddenSize; ++j)
+					out[p++] = UnmapParam(uz[i][j], RecurrentWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				out[p++] = UnmapParam(bz[i], BiasRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				out[p++] = UnmapParam(wr[i], InputWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				for (int j = 0; j < HiddenSize; ++j)
+					out[p++] = UnmapParam(ur[i][j], RecurrentWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				out[p++] = UnmapParam(br[i], BiasRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				out[p++] = UnmapParam(wh[i], InputWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				for (int j = 0; j < HiddenSize; ++j)
+					out[p++] = UnmapParam(uh[i][j], RecurrentWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				out[p++] = UnmapParam(bh[i], BiasRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				out[p++] = UnmapParam(wo[i], OutputWeightRange);
+
+			out[p++] = UnmapParam(bo, OutputBiasRange);
+		}
+
+		void VecToParams(const float* in)
+		{
+			int p = 0;
+
+			for (int i = 0; i < HiddenSize; ++i)
+				wz[i] = MapParam(in[p++], InputWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				for (int j = 0; j < HiddenSize; ++j)
+					uz[i][j] = MapParam(in[p++], RecurrentWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				bz[i] = MapParam(in[p++], BiasRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				wr[i] = MapParam(in[p++], InputWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				for (int j = 0; j < HiddenSize; ++j)
+					ur[i][j] = MapParam(in[p++], RecurrentWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				br[i] = MapParam(in[p++], BiasRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				wh[i] = MapParam(in[p++], InputWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				for (int j = 0; j < HiddenSize; ++j)
+					uh[i][j] = MapParam(in[p++], RecurrentWeightRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				bh[i] = MapParam(in[p++], BiasRange);
+
+			for (int i = 0; i < HiddenSize; ++i)
+				wo[i] = MapParam(in[p++], OutputWeightRange);
+
+			bo = MapParam(in[p++], OutputBiasRange);
+		}
+	};
+
+	class NLModelProcess
+	{
+	private:
+		float hs[HiddenSize];
+
+	public:
+		void Init()
+		{
+			for (int i = 0; i < HiddenSize; ++i)
+				hs[i] = 0.0f;
+		}
+
+		void ProcessBlock(NLModelParams& p, const float* in, float* out, int NumSamples)
+		{
+			for (int i = 0; i < NumSamples; ++i)
+			{
+				float x = in[i] * InputScale;
+
+				float h0[HiddenSize];
+				float z[HiddenSize];
+				float r[HiddenSize];
+				float ht[HiddenSize];
+
+				for (int j = 0; j < HiddenSize; ++j)
+					h0[j] = hs[j];
+
+				for (int j = 0; j < HiddenSize; ++j)
+				{
+					float v = p.wz[j] * x + p.bz[j];
+
+					for (int k = 0; k < HiddenSize; ++k)
+						v += p.uz[j][k] * h0[k];
+
+					z[j] = Sigmoid(v);
+				}
+
+				for (int j = 0; j < HiddenSize; ++j)
+				{
+					float v = p.wr[j] * x + p.br[j];
+
+					for (int k = 0; k < HiddenSize; ++k)
+						v += p.ur[j][k] * h0[k];
+
+					r[j] = Sigmoid(v);
+				}
+
+				for (int j = 0; j < HiddenSize; ++j)
+				{
+					float v = p.wh[j] * x + p.bh[j];
+
+					for (int k = 0; k < HiddenSize; ++k)
+						v += p.uh[j][k] * (r[k] * h0[k]);
+
+					ht[j] = Tanh(v);
+				}
+
+				for (int j = 0; j < HiddenSize; ++j)
+					hs[j] = (1.0f - z[j]) * ht[j] + z[j] * h0[j];
+
+				float y = in[i] + p.bo;
+
+				for (int j = 0; j < HiddenSize; ++j)
+					y += p.wo[j] * hs[j];
+
 				out[i] = y;
 			}
 		}
