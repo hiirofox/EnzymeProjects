@@ -10,6 +10,8 @@ WINDOWS_TARGET=false
 SOURCES=(
     "$ROOT/test.cpp"
     "$EXTERNAL/optim/src/unconstrained/gd.cpp"
+    "$EXTERNAL/optim/src/unconstrained/lbfgs.cpp"
+    "$EXTERNAL/optim/src/line_search/more_thuente.cpp"
 )
 
 INCLUDES=(
