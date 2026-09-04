@@ -5,15 +5,15 @@
 
 namespace NLModeling
 {
-	constexpr static int NumLayers = 6;
+	constexpr static int NumLayers = 8;
 	constexpr static int NLOrder = 4;
-	constexpr static int FiltOrder = 4;
+	constexpr static int FiltOrder = 2;
 	constexpr static int NumParams = NumLayers * NLOrder * (FiltOrder * 2 + 1);
 	struct NLModelParams
 	{
 		float ks[NumLayers][NLOrder][FiltOrder];
 		float gs[NumLayers][NLOrder][FiltOrder + 1];
-		void InitVecDirect(float* out)
+		static void InitVecDirect(float* out)
 		{
 			int p = 0;
 			for (int layer = 0; layer < NumLayers; ++layer)
@@ -63,7 +63,7 @@ namespace NLModeling
 	};
 
 	template<int i, int Order, typename Sample>
-	std::tuple<Sample, Sample> ProcessLattice(Sample x, Sample* z, Sample* k, Sample* g)
+	inline std::tuple<Sample, Sample> ProcessLattice(Sample x, Sample* z, Sample* k, Sample* g)
 	{
 		if constexpr (i >= Order) return { x,x * g[i] };
 		else
@@ -89,47 +89,75 @@ namespace NLModeling
 					for (int k = 0; k < FiltOrder; ++k)
 						zs[i][j][k] = 0;
 		}
+
+		inline float NonlinearChebyshev(float x, float& x0, float& x1, float k)
+		{
+			float nextx = 2.0 * x * x1 - x0;
+			x0 = x1, x1 = nextx;
+			return x0;
+		}
+		inline float NonlinearLegendre(float x, float& x0, float& x1, float k)
+		{
+			float nextx = ((2.0 * k + 1.0) * x * x1 - k * x0) / (k + 1.0);
+			x0 = x1, x1 = nextx;
+			return x0;
+		}
+		inline float NonlinearHermite(float x, float& x0, float& x1, float k)
+		{
+			float nextx = x * x1 - k * x0;
+			x0 = x1, x1 = nextx;
+			return x0;
+		}
+		inline float NonlinearMy(float x, float& x0, float& x1, float k)
+		{
+			x0 = x1 / (1.0 + fabsf(x1));
+			x1 *= x;
+			return x0;
+		}
+		inline float NonlinearSimple(float x, float& x0, float& x1, float k)
+		{
+			x0 *= x;
+			return x0;
+		}
+
+
 		void ProcessBlock(NLModelParams& p, const float* in, float* out, int NumSamples)
 		{
 			for (int i = 0; i < NumSamples; ++i)
 			{
-				float y = in[i];
+				float x = in[i];
 				for (int n = 0; n < NumLayers; ++n)
 				{
-					float x0 = y;
-					float y0 = 0;
+					float y = 0;
+					float x0 = 1.0, x1 = x;
 					for (int j = 0; j < NLOrder; ++j)
 					{
-						auto [pass, total] = ProcessLattice<0, FiltOrder, float>(x0, zs[n][j], p.ks[n][j], p.gs[n][j]);
-						y0 += total;
-						x0 *= y;//nonlinear
+						float nlout = NonlinearSimple(x, x0, x1, j + 1);
+						auto [pass, total] = ProcessLattice<0, FiltOrder, float>(nlout, zs[n][j], p.ks[n][j], p.gs[n][j]);
+						y += total;
 					}
-					y = y0;
+					x = y;
 				}
-				out[i] = y;
+				out[i] = x;
 			}
 		}
 	};
 }
-#pragma once
-
-#include <cmath>
 
 namespace NLModelingGRU
 {
-	constexpr static int HiddenSize = 4;
-	constexpr static int NumLayers = 4;
+	constexpr static int HiddenSize = 8;
 
 	constexpr static int GateParams = HiddenSize + HiddenSize * HiddenSize + HiddenSize;
 	constexpr static int NumParams = GateParams * 3 + HiddenSize + 1;
 
-	constexpr static float InputScale = 80.0f;
+	constexpr static float InputScale = 8000.0f;
 
-	constexpr static float InputWeightRange = 4.0f;
-	constexpr static float RecurrentWeightRange = 1.0f;
-	constexpr static float BiasRange = 6.0f;
-	constexpr static float OutputWeightRange = 4.0f;
-	constexpr static float OutputBiasRange = 2.0f;
+	constexpr static float InputWeightRange = 4000.0f;
+	constexpr static float RecurrentWeightRange = 1000.0f;
+	constexpr static float BiasRange = 6000.0f;
+	constexpr static float OutputWeightRange = 4000.0f;
+	constexpr static float OutputBiasRange = 2000.0f;
 
 	/*
 	template<typename Sample>
@@ -142,6 +170,7 @@ namespace NLModelingGRU
 	{
 		return std::tanh(x);
 	}*/
+	/*
 	template<typename Sample>
 	static inline Sample Clip(Sample x, Sample lo, Sample hi)
 	{
@@ -156,16 +185,17 @@ namespace NLModelingGRU
 	static inline Sample Sigmoid(Sample x)
 	{
 		return Clip(Sample(0.5) + Sample(0.25) * x, Sample(0), Sample(1));
-	}
-	/*
-	static inline float Tanh(float x)
-	{
-		return x / sqrtf(1.0f + x * x);
-	}
-	static inline float Sigmoid(float x)
-	{
-		return 0.5f * (1.0f + x / sqrtf(4.0f + x * x));
 	}*/
+	template<typename Sample>
+	static inline Sample Tanh(Sample x)
+	{
+		return x / (1.0f + fabsf(x));
+	}
+	template<typename Sample>
+	static inline Sample Sigmoid(Sample x)
+	{
+		return Sample(0.5) * (std::tanh(Sample(0.5) * x) + Sample(1));
+	}
 
 	static inline float MapParam(float x, float range)
 	{
@@ -194,7 +224,7 @@ namespace NLModelingGRU
 		float wo[HiddenSize];
 		float bo;
 
-		void InitVecDirect(float* out)
+		static void InitVecDirect(float* out)
 		{
 			static_assert((HiddenSize & 1) == 0);
 
@@ -328,6 +358,10 @@ namespace NLModelingGRU
 	private:
 		float hs[HiddenSize];
 
+		float h0[HiddenSize];
+		float z[HiddenSize];
+		float r[HiddenSize];
+		float ht[HiddenSize];
 	public:
 		void Init()
 		{
@@ -341,10 +375,6 @@ namespace NLModelingGRU
 			{
 				float x = in[i] * InputScale;
 
-				float h0[HiddenSize];
-				float z[HiddenSize];
-				float r[HiddenSize];
-				float ht[HiddenSize];
 
 				for (int j = 0; j < HiddenSize; ++j)
 					h0[j] = hs[j];

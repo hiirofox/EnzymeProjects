@@ -25,7 +25,8 @@ CMD=(
     clang++-18
     "${SOURCES[@]}"
     -std=c++17
-    -O3 -march=native
+    -O3 -march=native -fopenmp
+    #-ffast-math
     -DOPTIM_ENABLE_EIGEN_WRAPPERS
     -fplugin="$EXTERNAL/ClangEnzyme-18.so"
 )
