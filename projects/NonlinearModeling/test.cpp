@@ -62,7 +62,7 @@ void FFT(float* re, float* im, int inv)
 		}
 	}
 }
-#define SelectedNL NLModeling2
+#define SelectedNL NLModeling3
 constexpr static int NumParams = SelectedNL::NumParams;
 constexpr static int bootSize = 48000 / 20;//留一些采样供响应稳定
 int BatchSampleLen = 65536;
@@ -167,7 +167,7 @@ void loss_wrapper(
 	const float targetR8 = powf(target8, 1.0 / 8.0);
 	const float timeSoftPeak = errR8 / (targetR8 + eps);
 
-	float loss = rms * 10.0 + timeSoftPeak * 10.0 + specSoftPeak * 80.0;
+	float loss = rms * 50.0 + timeSoftPeak * 100.0 + specSoftPeak * 50.0;
 
 	*outLoss = loss;
 	*specPeak = specSoftPeak;
@@ -334,7 +334,7 @@ double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data
 	grad /= NumTasks;
 	if (grad_out)
 		*grad_out = grad.cast<double>();
-	if (iter % 5 == 0)
+	if (iter % 1 == 0)
 		printf("Iter%5d loss=%03.5f specPeak=%03.5f rms=%03.5f max=%03.5f\n",
 			iter, sumLoss, sumSpecPeak, sumRms, sumMax);
 	++iter;
@@ -363,7 +363,7 @@ int SegmentBlock(std::vector<float>& samples, int numSamples, std::vector<int>& 
 		for (int j = startPos, k = 0; j < startPos + bootSize; ++j, ++k)
 		{
 			float x = (float)k / bootSize;
-			//samples[j] *= WindowFunc(x - 1.0);//给数据集一个缓慢上升的窗
+			samples[j] *= WindowFunc(x - 1.0);//给数据集一个缓慢上升的窗
 		}
 	}
 	return blockSize;
@@ -381,7 +381,7 @@ public:
 	{
 	}
 
-	double EvaluateWithGradient(const arma::mat & x, arma::mat & grad)
+	double EvaluateWithGradient(const arma::mat& x, arma::mat& grad)
 	{
 		Eigen::VectorXd xEigen(NumParams);
 		Eigen::VectorXd gradEigen(NumParams);
@@ -399,9 +399,9 @@ public:
 	}
 
 	double EvaluateWithGradient(
-		const arma::mat & x,
+		const arma::mat& x,
 		const size_t begin,
-		arma::mat & grad,
+		arma::mat& grad,
 		const size_t batchSize)
 	{
 		return EvaluateWithGradient(x, grad);
@@ -454,21 +454,23 @@ int main()
 		x[i] = directParams[i];
 
 	EnsmallenObjective objectiveFunction;
-
-	ens::Adam adam;
-	adam.StepSize() = 0.00001;
-	adam.BatchSize() = 1;
-	adam.Beta1() = 0.9;
-	adam.Beta2() = 0.999;
-	adam.Epsilon() = 1e-8;
-	adam.MaxIterations() = 200;
-	adam.Tolerance() = 0.0;
-	adam.Shuffle() = false;
-	adam.Optimize(objectiveFunction, x);
-
-	iter = 0;
-
-	ens::L_BFGS lbfgs;
-	lbfgs.MaxIterations() = 1000000;
-	lbfgs.Optimize(objectiveFunction, x);
+	float lrstart = 0.0001;
+	for (;;)
+	{
+		iter = 0;
+		ens::Adam adam;
+		adam.StepSize() = lrstart;
+		adam.BatchSize() = 1;
+		adam.Beta1() = 0.9;
+		adam.Beta2() = 0.999;
+		adam.Epsilon() = 1e-8;
+		adam.MaxIterations() = 200;
+		adam.Tolerance() = 0.0;
+		adam.Shuffle() = false;
+		adam.Optimize(objectiveFunction, x);
+		iter = 0;
+		ens::L_BFGS lbfgs;
+		lbfgs.MaxIterations() = 50;
+		lbfgs.Optimize(objectiveFunction, x);
+	}
 }
