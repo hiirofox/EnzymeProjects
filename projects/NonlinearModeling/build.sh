@@ -17,6 +17,7 @@ SOURCES=(
 INCLUDES=(
     "$EXTERNAL/eigen"
     "$EXTERNAL/optim/include"
+    "$EXTERNAL/ensmallen/include"
 )
 
 mkdir -p "$BUILD"
@@ -24,6 +25,9 @@ mkdir -p "$BUILD"
 CMD=(
     clang++-18
     "${SOURCES[@]}"
+
+    -larmadillo
+
     -std=c++17
     -O3 -march=native -fopenmp
     #-ffast-math

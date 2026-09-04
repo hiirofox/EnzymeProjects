@@ -3,7 +3,9 @@
 #include <future>
 #include <algorithm>
 #include <queue>
-#include <optim.hpp>
+#include <ensmallen.hpp>
+#include <Eigen/Dense>
+//#include <optim.hpp>
 #include <cmath>
 #include <utility>
 #include "NLModeling.h"
@@ -60,7 +62,7 @@ void FFT(float* re, float* im, int inv)
 		}
 	}
 }
-#define SelectedNL NLModelingGRU
+#define SelectedNL NLModeling2
 constexpr static int NumParams = SelectedNL::NumParams;
 constexpr static int bootSize = 48000 / 20;//留一些采样供响应稳定
 int BatchSampleLen = 65536;
@@ -113,13 +115,13 @@ void loss_wrapper(
 			float mag2 = tmpre2[j] * tmpre2[j] + tmpim2[j] * tmpim2[j];
 
 			float d = mag1 - mag2;
-			float d2 = d * d * 0.001f;
+			float d2 = d * d * 0.0001f;
 			float d4 = d2 * d2;
 			float d8 = d4 * d4;
 			sumd8 += d8;
 
 			float t = mag2;
-			float t2 = t * t * 0.001f;
+			float t2 = t * t * 0.0001f;
 			float t4 = t2 * t2;
 			float t8 = t4 * t4;
 			sumt8 += t8;
@@ -127,7 +129,7 @@ void loss_wrapper(
 	}
 	sumd8 = powf(sumd8, 1.0 / 8.0);
 	sumt8 = powf(sumt8, 1.0 / 8.0);
-	float specSoftPeak = sumd8 / sumt8;
+	float specSoftPeak = sumd8 / (sumt8 + 1e-3);
 
 	float errSq = 0.0f;
 	float errMax = 0.0f;
@@ -157,7 +159,7 @@ void loss_wrapper(
 	const float invN = 1.0f / static_cast<float>(batchLen - bootSize);
 	const float errRMS = sqrtf(errSq * invN);
 	const float targetRMS = sqrtf(targetSq * invN);
-	constexpr float eps = 1e-12f;
+	constexpr float eps = 1e-3f;
 	const float rms = errRMS / (targetRMS + eps);
 	const float max = errMax / (targetMax + eps);
 
@@ -361,11 +363,50 @@ int SegmentBlock(std::vector<float>& samples, int numSamples, std::vector<int>& 
 		for (int j = startPos, k = 0; j < startPos + bootSize; ++j, ++k)
 		{
 			float x = (float)k / bootSize;
-			samples[j] *= WindowFunc(x - 1.0);//给数据集一个缓慢上升的窗
+			//samples[j] *= WindowFunc(x - 1.0);//给数据集一个缓慢上升的窗
 		}
 	}
 	return blockSize;
 }
+
+class EnsmallenObjective
+{
+public:
+	size_t NumFunctions()
+	{
+		return 1;
+	}
+
+	void Shuffle()
+	{
+	}
+
+	double EvaluateWithGradient(const arma::mat & x, arma::mat & grad)
+	{
+		Eigen::VectorXd xEigen(NumParams);
+		Eigen::VectorXd gradEigen(NumParams);
+
+		for (int i = 0; i < NumParams; ++i)
+			xEigen[i] = x[i];
+
+		double loss = objective(xEigen, &gradEigen, nullptr);
+
+		grad.set_size(NumParams, 1);
+		for (int i = 0; i < NumParams; ++i)
+			grad[i] = gradEigen[i];
+
+		return loss;
+	}
+
+	double EvaluateWithGradient(
+		const arma::mat & x,
+		const size_t begin,
+		arma::mat & grad,
+		const size_t batchSize)
+	{
+		return EvaluateWithGradient(x, grad);
+	}
+};
 
 WavReader wr;
 int main()
@@ -395,8 +436,8 @@ int main()
 	{
 		//testX[i] *= 0.1;
 		//targetY[i] *= 0.1;
-		xrms += testX[i] * testX[i] * 0.001;
-		yrms += targetY[i] * targetY[i] * 0.001;
+		xrms += testX[i] * testX[i] * 0.01;
+		yrms += targetY[i] * targetY[i] * 0.01;
 	}
 	yAvgEnergy = yrms / BatchSampleLen / 0.0001;
 	numTrainBlocks = SegmentBlock(testX, BatchSampleLen, blockStart, blockLen);
@@ -408,19 +449,26 @@ int main()
 
 	float directParams[NumParams];
 	SelectedNL::NLModelParams::InitVecDirect(directParams);
-	Eigen::VectorXd x(NumParams);
+	arma::vec x(NumParams);
 	for (int i = 0; i < NumParams; ++i)
 		x[i] = directParams[i];
 
-	optim::algo_settings_t settings;
-	settings.gd_settings.method = 6;
-	settings.gd_settings.par_step_size = 0.000001;
-	settings.gd_settings.par_adam_beta_1 = 0.9;
-	settings.gd_settings.par_adam_beta_2 = 0.999;
-	settings.iter_max = 2000000;
-	bool success = optim::gd(x, objective, NULL, settings);
+	EnsmallenObjective objectiveFunction;
+
+	ens::Adam adam;
+	adam.StepSize() = 0.00001;
+	adam.BatchSize() = 1;
+	adam.Beta1() = 0.9;
+	adam.Beta2() = 0.999;
+	adam.Epsilon() = 1e-8;
+	adam.MaxIterations() = 200;
+	adam.Tolerance() = 0.0;
+	adam.Shuffle() = false;
+	adam.Optimize(objectiveFunction, x);
 
 	iter = 0;
-	settings.iter_max = 1000000;
-	success = optim::lbfgs(x, objective, nullptr, settings);
+
+	ens::L_BFGS lbfgs;
+	lbfgs.MaxIterations() = 1000000;
+	lbfgs.Optimize(objectiveFunction, x);
 }
