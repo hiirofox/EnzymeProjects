@@ -108,54 +108,93 @@ private:
 		WriteValue<uint32_t>(0); // 稍后回填
 	}
 };
-
 class WavReader
 {
 public:
-	bool OpenWAV(std::string path)
+	bool OpenWAV(const std::string& path)
 	{
 		Close();
 
+		m_file.clear();
 		m_file.open(path, std::ios::binary);
+
 		if (!m_file.is_open())
 			return false;
 
 		return ReadHeader();
 	}
 
+	// 读取双声道。
+	// 如果源文件是 mono，则同一个 mono 信号复制到左右声道。
 	int ReadBlock(float* bufl, float* bufr, int numSamples)
 	{
-		if (!m_file.is_open() || bufl == nullptr || bufr == nullptr || numSamples <= 0)
+		if (!m_file.is_open() ||
+			bufl == nullptr ||
+			bufr == nullptr ||
+			numSamples <= 0)
+		{
 			return 0;
+		}
 
 		int samplesRead = 0;
 
 		for (int i = 0; i < numSamples; ++i)
 		{
-			if (m_dataBytesRemaining < sizeof(int16_t) * 2)
+			float l = 0.0f;
+			float r = 0.0f;
+
+			if (!ReadFrame(l, r))
 				break;
 
-			int16_t l = 0;
-			int16_t r = 0;
+			bufl[i] = l;
+			bufr[i] = r;
 
-			ReadValue(l);
-			ReadValue(r);
-
-			if (!m_file)
-				break;
-
-			bufl[i] = Int16ToFloat(l);
-			bufr[i] = Int16ToFloat(r);
-
-			m_dataBytesRemaining -= sizeof(int16_t) * 2;
 			++samplesRead;
 		}
 
-		// 文件末尾不足一整块时，剩余部分补 0
+		// 不足部分补零
 		for (int i = samplesRead; i < numSamples; ++i)
 		{
 			bufl[i] = 0.0f;
 			bufr[i] = 0.0f;
+		}
+
+		return samplesRead;
+	}
+
+	// mono 文件：直接读取 mono
+	// stereo 文件：默认取右声道
+	int ReadBlockMono(float* buf, int numSamples)
+	{
+		if (!m_file.is_open() ||
+			buf == nullptr ||
+			numSamples <= 0)
+		{
+			return 0;
+		}
+
+		int samplesRead = 0;
+
+		for (int i = 0; i < numSamples; ++i)
+		{
+			float l = 0.0f;
+			float r = 0.0f;
+
+			if (!ReadFrame(l, r))
+				break;
+
+			if (m_numChannels == 1)
+				buf[i] = l;
+			else
+				buf[i] = r; // stereo 默认取右声道
+
+			++samplesRead;
+		}
+
+		// 不足部分补零
+		for (int i = samplesRead; i < numSamples; ++i)
+		{
+			buf[i] = 0.0f;
 		}
 
 		return samplesRead;
@@ -166,10 +205,17 @@ public:
 		if (m_file.is_open())
 			m_file.close();
 
+		m_file.clear();
+
 		m_sampleRate = 0;
 		m_numSamples = 0;
 		m_dataBytesRemaining = 0;
 		m_dataStartPos = 0;
+
+		m_audioFormat = 0;
+		m_numChannels = 0;
+		m_bitsPerSample = 0;
+		m_blockAlign = 0;
 	}
 
 	bool IsOpen() const
@@ -189,7 +235,10 @@ public:
 
 	uint64_t GetSamplesRemaining() const
 	{
-		return m_dataBytesRemaining / (sizeof(int16_t) * 2);
+		if (m_blockAlign == 0)
+			return 0;
+
+		return m_dataBytesRemaining / m_blockAlign;
 	}
 
 	~WavReader()
@@ -200,9 +249,16 @@ public:
 private:
 	std::ifstream m_file;
 
+	uint16_t m_audioFormat = 0;
+	uint16_t m_numChannels = 0;
+	uint16_t m_bitsPerSample = 0;
+	uint16_t m_blockAlign = 0;
+
 	uint32_t m_sampleRate = 0;
+
 	uint64_t m_numSamples = 0;
 	uint64_t m_dataBytesRemaining = 0;
+
 	std::streampos m_dataStartPos = 0;
 
 private:
@@ -214,7 +270,9 @@ private:
 	template <typename T>
 	void ReadValue(T& value)
 	{
-		m_file.read(reinterpret_cast<char*>(&value), sizeof(T));
+		m_file.read(
+			reinterpret_cast<char*>(&value),
+			sizeof(T));
 	}
 
 	void ReadText(char* text, int size)
@@ -230,10 +288,114 @@ private:
 			a[3] == b[3];
 	}
 
+	// 读取一帧音频。
+	// mono:
+	//   l == r == mono
+	//
+	// stereo:
+	//   l / r 分别返回左右声道
+	bool ReadFrame(float& l, float& r)
+	{
+		if (!m_file.is_open())
+			return false;
+
+		if (m_blockAlign == 0)
+			return false;
+
+		if (m_dataBytesRemaining < m_blockAlign)
+			return false;
+
+		// =========================================
+		// 16-bit integer PCM
+		// =========================================
+		if (m_audioFormat == 1 &&
+			m_bitsPerSample == 16)
+		{
+			if (m_numChannels == 1)
+			{
+				int16_t mono = 0;
+
+				ReadValue(mono);
+
+				if (!m_file)
+					return false;
+
+				float v = Int16ToFloat(mono);
+
+				l = v;
+				r = v;
+			}
+			else if (m_numChannels == 2)
+			{
+				int16_t left = 0;
+				int16_t right = 0;
+
+				ReadValue(left);
+				ReadValue(right);
+
+				if (!m_file)
+					return false;
+
+				l = Int16ToFloat(left);
+				r = Int16ToFloat(right);
+			}
+			else
+			{
+				return false;
+			}
+		}
+
+		// =========================================
+		// 32-bit IEEE Float
+		// =========================================
+		else if (m_audioFormat == 3 &&
+			m_bitsPerSample == 32)
+		{
+			if (m_numChannels == 1)
+			{
+				float mono = 0.0f;
+
+				ReadValue(mono);
+
+				if (!m_file)
+					return false;
+
+				l = mono;
+				r = mono;
+			}
+			else if (m_numChannels == 2)
+			{
+				float left = 0.0f;
+				float right = 0.0f;
+
+				ReadValue(left);
+				ReadValue(right);
+
+				if (!m_file)
+					return false;
+
+				l = left;
+				r = right;
+			}
+			else
+			{
+				return false;
+			}
+		}
+		else
+		{
+			return false;
+		}
+
+		m_dataBytesRemaining -= m_blockAlign;
+
+		return true;
+	}
+
 	bool ReadHeader()
 	{
-		char riff[4];
-		char wave[4];
+		char riff[4] = {};
+		char wave[4] = {};
 
 		ReadText(riff, 4);
 
@@ -242,7 +404,9 @@ private:
 
 		ReadText(wave, 4);
 
-		if (!m_file || !MatchText(riff, "RIFF") || !MatchText(wave, "WAVE"))
+		if (!m_file ||
+			!MatchText(riff, "RIFF") ||
+			!MatchText(wave, "WAVE"))
 		{
 			Close();
 			return false;
@@ -251,14 +415,9 @@ private:
 		bool foundFmt = false;
 		bool foundData = false;
 
-		uint16_t audioFormat = 0;
-		uint16_t numChannels = 0;
-		uint16_t bitsPerSample = 0;
-		uint16_t blockAlign = 0;
-
 		while (m_file && (!foundFmt || !foundData))
 		{
-			char chunkId[4];
+			char chunkId[4] = {};
 			uint32_t chunkSize = 0;
 
 			ReadText(chunkId, 4);
@@ -271,14 +430,27 @@ private:
 
 			if (MatchText(chunkId, "fmt "))
 			{
+				// 标准 fmt 至少需要 16 字节
+				if (chunkSize < 16)
+				{
+					Close();
+					return false;
+				}
+
 				uint32_t byteRate = 0;
 
-				ReadValue(audioFormat);
-				ReadValue(numChannels);
+				ReadValue(m_audioFormat);
+				ReadValue(m_numChannels);
 				ReadValue(m_sampleRate);
 				ReadValue(byteRate);
-				ReadValue(blockAlign);
-				ReadValue(bitsPerSample);
+				ReadValue(m_blockAlign);
+				ReadValue(m_bitsPerSample);
+
+				if (!m_file)
+				{
+					Close();
+					return false;
+				}
 
 				foundFmt = true;
 			}
@@ -291,14 +463,16 @@ private:
 			}
 
 			// 跳到下一个 chunk
-			// 注意：即使找到了 data，也先记录 data 起点，最后再 seek 回来
-			std::streamoff skipSize = static_cast<std::streamoff>(chunkSize);
+			std::streamoff skipSize =
+				static_cast<std::streamoff>(chunkSize);
 
-			// WAV chunk 是 word-aligned，奇数字节后面有 1 byte padding
-			if (skipSize % 2 == 1)
+			// RIFF chunk 按 2 字节对齐
+			if (skipSize & 1)
 				++skipSize;
 
-			m_file.seekg(chunkDataStart + skipSize, std::ios::beg);
+			m_file.seekg(
+				chunkDataStart + skipSize,
+				std::ios::beg);
 		}
 
 		if (!foundFmt || !foundData)
@@ -307,24 +481,66 @@ private:
 			return false;
 		}
 
-		// 这里只支持 16-bit PCM stereo
-		if (audioFormat != 1 || numChannels != 2 || bitsPerSample != 16)
+		// 只支持 mono / stereo
+		if (m_numChannels != 1 &&
+			m_numChannels != 2)
 		{
 			Close();
 			return false;
 		}
 
-		if (blockAlign != sizeof(int16_t) * 2)
+		// 支持：
+		//
+		// format 1 = integer PCM
+		// format 3 = IEEE Float
+		bool supported = false;
+
+		if (m_audioFormat == 1 &&
+			m_bitsPerSample == 16)
+		{
+			supported = true;
+		}
+		else if (m_audioFormat == 3 &&
+			m_bitsPerSample == 32)
+		{
+			supported = true;
+		}
+
+		if (!supported)
 		{
 			Close();
 			return false;
 		}
 
-		m_numSamples = m_dataBytesRemaining / blockAlign;
+		// 检查 blockAlign
+		uint16_t expectedBlockAlign =
+			static_cast<uint16_t>(
+				m_numChannels *
+				(m_bitsPerSample / 8));
 
-		// 回到 data chunk 的起点，准备正式读取音频数据
+		if (m_blockAlign != expectedBlockAlign)
+		{
+			Close();
+			return false;
+		}
+
+		if (m_blockAlign == 0)
+		{
+			Close();
+			return false;
+		}
+
+		// WAV 中这里实际上是 frame 数量。
+		// mono 时一个 frame = 一个 sample
+		// stereo 时一个 frame = L + R
+		m_numSamples =
+			m_dataBytesRemaining / m_blockAlign;
+
+		// 回到 data chunk 开始位置
 		m_file.clear();
-		m_file.seekg(m_dataStartPos, std::ios::beg);
+		m_file.seekg(
+			m_dataStartPos,
+			std::ios::beg);
 
 		if (!m_file)
 		{

@@ -1,6 +1,8 @@
 #define OPTIM_ENABLE_EIGEN_WRAPPERS
 
 #include <future>
+#include <algorithm>
+#include <queue>
 #include <optim.hpp>
 #include <cmath>
 #include <utility>
@@ -60,8 +62,10 @@ void FFT(float* re, float* im, int inv)
 }
 #define SelectedNL NLModelingGRU
 constexpr static int NumParams = SelectedNL::NumParams;
-constexpr static int BatchSampleLen = 48000 * 2;
-float testX[BatchSampleLen], targetY[BatchSampleLen];
+constexpr static int bootSize = 48000 / 20;//留一些采样供响应稳定
+int BatchSampleLen = 65536;
+//float* testX, * targetY;
+std::vector<float> testX, targetY;
 
 constexpr static int WindowSize = 1024;
 constexpr static int HopSize = 512;
@@ -69,6 +73,8 @@ float window[WindowSize];//Harris-Blackman
 void loss_wrapper(
 	float* params,
 	int n, int startPos, int batchLen,
+	const float* testX,
+	const float* targetY,
 	float* outLoss,
 	float* specPeak,
 	float* outRMS,
@@ -84,11 +90,11 @@ void loss_wrapper(
 
 	nlParams.VecToParams(params);
 	nlproc.Init();
-	nlproc.ProcessBlock(nlParams, testX, y, batchLen);
+	nlproc.ProcessBlock(nlParams, &testX[startPos], y, batchLen);
 
 	float sumd8 = 0;
 	float sumt8 = 0;
-	for (int i = 0; i < batchLen - WindowSize; i += HopSize)
+	for (int i = bootSize; i < batchLen - WindowSize; i += HopSize)
 	{
 		for (int j = 0; j < WindowSize; ++j)
 		{
@@ -130,7 +136,7 @@ void loss_wrapper(
 
 	float err8 = 0.0;
 	float target8 = 0.0;
-	for (int i = 0; i < batchLen; ++i)
+	for (int i = bootSize; i < batchLen; ++i)
 	{
 		const float t = targetY[i + startPos];
 		const float d = y[i] - t;
@@ -148,7 +154,7 @@ void loss_wrapper(
 		err8 += d8;
 		target8 += t8;
 	}
-	const float invN = 1.0f / static_cast<float>(batchLen);
+	const float invN = 1.0f / static_cast<float>(batchLen - bootSize);
 	const float errRMS = sqrtf(errSq * invN);
 	const float targetRMS = sqrtf(targetSq * invN);
 	constexpr float eps = 1e-12f;
@@ -159,7 +165,7 @@ void loss_wrapper(
 	const float targetR8 = powf(target8, 1.0 / 8.0);
 	const float timeSoftPeak = errR8 / (targetR8 + eps);
 
-	float loss = rms * 50.0 + timeSoftPeak * 100.0 + specSoftPeak * 50.0;
+	float loss = rms * 10.0 + timeSoftPeak * 10.0 + specSoftPeak * 80.0;
 
 	*outLoss = loss;
 	*specPeak = specSoftPeak;
@@ -167,7 +173,7 @@ void loss_wrapper(
 	*outMax = max;
 }
 
-std::tuple<float, float, float, float > get_gradient(float* params, float* grad, int n,
+std::tuple<float, float, float, float > get_gradient(const float* params, float* grad, int n,
 	int startPos, int batchLen)
 {
 	std::fill(grad, grad + n, 0.0f);
@@ -183,26 +189,16 @@ std::tuple<float, float, float, float > get_gradient(float* params, float* grad,
 	float dMax = 0.0f;
 	__enzyme_autodiff(
 		(void*)loss_wrapper,
-		// params -> 求 dLoss/dparams
-		enzyme_dup,
-		params, grad,
-		// n
-		enzyme_const,
-		n,
-		enzyme_const,
-		startPos, batchLen,
-		// loss
-		enzyme_dup,
-		&lossValue, &dLoss,
-		// specPeak
-		enzyme_dup,
-		&specPeakValue, &dSpecPeak,
-		// RMS
-		enzyme_dup,
-		&rmsValue, &dRMS,
-		// Max
-		enzyme_dup,
-		&maxValue, &dMax
+		enzyme_dup, params, grad,
+		enzyme_const, n,
+		enzyme_const, startPos,
+		enzyme_const, batchLen,
+		enzyme_const, testX.data(),
+		enzyme_const, targetY.data(),
+		enzyme_dup, &lossValue, &dLoss,
+		enzyme_dup, &specPeakValue, &dSpecPeak,
+		enzyme_dup, &rmsValue, &dRMS,
+		enzyme_dup, &maxValue, &dMax
 	);
 	return {
 		lossValue,
@@ -212,29 +208,137 @@ std::tuple<float, float, float, float > get_gradient(float* params, float* grad,
 	};
 }
 
+const int NumTasks = 12;
+int numTrainBlocks = NumTasks;
+std::vector<int> blockStart;
+std::vector<int> blockLen;
+class ADThreadPool
+{
+public:
+	using Metrics = std::tuple<float, float, float, float>;
+	struct TaskResult
+	{
+		Metrics metrics;
+		Eigen::VectorXf grad;
+	};
+private:
+	std::array<std::thread, NumTasks> pool;
+	std::array<TaskResult, NumTasks> results;
+	std::array<int, NumTasks> starts{};
+	std::array<int, NumTasks> lengths{};
+	std::array<bool, NumTasks> pending{};
+	std::array<bool, NumTasks> done{};
+	std::mutex mutex;
+	std::condition_variable cv;
+	bool stop = false;
+	const float* params = nullptr;
+	void ADTask(int id)
+	{
+		while (true)
+		{
+			int startPos, batchLen;
+			const float* p;
+			{
+				std::unique_lock lock(mutex);
+				cv.wait(lock, [&] { return stop || pending[id]; });
+				if (stop) return;
+				startPos = starts[id];
+				batchLen = lengths[id];
+				p = params;
+				pending[id] = false;
+			}
+			auto& result = results[id];
+			result.metrics = get_gradient(p, result.grad.data(), NumParams, startPos, batchLen);
+
+			{
+				std::lock_guard lock(mutex);
+				done[id] = true;
+			}
+			cv.notify_all();
+		}
+	}
+public:
+	ADThreadPool()
+	{
+		for (auto& r : results)
+			r.grad = Eigen::VectorXf::Zero(NumParams);
+		for (int i = 0; i < NumTasks; ++i)
+			pool[i] = std::thread(&ADThreadPool::ADTask, this, i);
+	}
+	~ADThreadPool()
+	{
+		{
+			std::lock_guard lock(mutex);
+			stop = true;
+		}
+		cv.notify_all();
+
+		for (auto& t : pool)
+			if (t.joinable()) t.join();
+	}
+	void SetParams(const float* p)
+	{
+		params = p;
+	}
+	void AddTask(int id, int startPos, int batchLen)
+	{
+		{
+			std::lock_guard lock(mutex);
+			starts[id] = startPos;
+			lengths[id] = batchLen;
+			done[id] = false;
+			pending[id] = true;
+		}
+		cv.notify_all();
+	}
+	TaskResult GetResult(int id)
+	{
+		std::unique_lock lock(mutex);
+		cv.wait(lock, [&] { return done[id]; });
+		return results[id];
+	}
+};
+ADThreadPool adPool;
 int iter = 0;
-double objective(
-	const Eigen::VectorXd& x,
-	Eigen::VectorXd* grad_out,
-	void* data)
+double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data)
 {
 	Eigen::VectorXf params = x.cast<float>();
-	Eigen::VectorXf grad(x.size());
+	adPool.SetParams(params.data());
 
-	int startPos = 0, batchLen = BatchSampleLen;
-	auto [loss, specPeak, rms, max] =
-		get_gradient(params.data(), grad.data(), NumParams,
-			startPos, batchLen);//性能项
+	for (int i = 0; i < NumTasks; ++i)
+		adPool.AddTask(i, blockStart[i], blockLen[i]);
 
-	if (grad_out)  *grad_out = grad.cast<double>();
-	if (iter % 20 == 0)
+	float sumLoss = 0.0f;
+	float sumSpecPeak = 0.0f;
+	float sumRms = 0.0f;
+	float sumMax = 0.0f;
+	Eigen::VectorXf grad = Eigen::VectorXf::Zero(NumParams);
+
+	for (int i = 0; i < NumTasks; ++i)
 	{
-		printf("Iter%5d loss=%03.5f specPeak=%03.5f rms=%03.5f max=%03.5f\n",
-			iter, loss, specPeak, rms, max);
+		auto result = adPool.GetResult(i);
+		auto [loss, specPeak, rms, max] = result.metrics;
+		sumLoss += loss;
+		sumSpecPeak += specPeak;
+		sumRms += rms;
+		sumMax += max;
+		grad += result.grad;
 	}
-	iter++;
-	return loss;
+
+	sumLoss /= NumTasks;
+	sumSpecPeak /= NumTasks;
+	sumRms /= NumTasks;
+	sumMax /= NumTasks;
+	grad /= NumTasks;
+	if (grad_out)
+		*grad_out = grad.cast<double>();
+	if (iter % 5 == 0)
+		printf("Iter%5d loss=%03.5f specPeak=%03.5f rms=%03.5f max=%03.5f\n",
+			iter, sumLoss, sumSpecPeak, sumRms, sumMax);
+	++iter;
+	return sumLoss;
 }
+
 float WindowFunc(float x)//nice window near Harries-Blackman
 {
 	float z = x * x;
@@ -245,13 +349,62 @@ float WindowFunc(float x)//nice window near Harries-Blackman
 	q = q * q;
 	return std::fma(-z, q, q);
 }
+int SegmentBlock(std::vector<float>& samples, int numSamples, std::vector<int>& start, std::vector<int>& len)
+{
+	int blockSize = numSamples / NumTasks;
+	for (int i = 0; i < NumTasks; ++i)
+	{
+		printf("block:%d:%d (%.2fs)\n", blockSize * i, blockSize, blockSize / 48000.0);
+		int startPos = blockSize * i;
+		start.push_back(startPos);
+		len.push_back(blockSize);
+		for (int j = startPos, k = 0; j < startPos + bootSize; ++j, ++k)
+		{
+			float x = (float)k / bootSize;
+			samples[j] *= WindowFunc(x - 1.0);//给数据集一个缓慢上升的窗
+		}
+	}
+	return blockSize;
+}
+
+WavReader wr;
 int main()
 {
 	for (int i = 0; i < WindowSize; ++i)
 	{
 		window[i] = WindowFunc((float)i / WindowSize * 2.0 - 1.0);
 	}
-	GenerateTestData(testX, targetY, BatchSampleLen);
+
+	//testX.resize(BatchSampleLen);
+	//targetY.resize(BatchSampleLen);
+	//GenerateTestData(testX.data(), targetY.data(), BatchSampleLen);
+
+	std::string root = "/home/hiirofox/TestEnzyme/projects/NonlinearModeling/builds/";
+	wr.OpenWAV(root + "input.wav");
+	BatchSampleLen = wr.GetNumSamples();
+	printf("wav NumSamples:%d\n", BatchSampleLen);
+	testX.resize(BatchSampleLen);
+	targetY.resize(BatchSampleLen);
+	wr.ReadBlockMono(testX.data(), BatchSampleLen);
+	wr.OpenWAV(root + "target.wav");
+	wr.ReadBlockMono(targetY.data(), BatchSampleLen);
+	float xrms = 0;
+	float yrms = 0;
+	float yAvgEnergy = 0;
+	for (int i = 0; i < BatchSampleLen; ++i)
+	{
+		//testX[i] *= 0.1;
+		//targetY[i] *= 0.1;
+		xrms += testX[i] * testX[i] * 0.001;
+		yrms += targetY[i] * targetY[i] * 0.001;
+	}
+	yAvgEnergy = yrms / BatchSampleLen / 0.0001;
+	numTrainBlocks = SegmentBlock(testX, BatchSampleLen, blockStart, blockLen);
+
+	xrms = sqrtf(xrms / 0.0001);
+	yrms = sqrtf(yrms / 0.0001);
+	printf("boot sample:%d(%.2fs)\n", bootSize, (float)bootSize / 48000.0);
+	printf("read ok. xrms=%.5f yrms=%.5f\n", xrms, yrms);
 
 	float directParams[NumParams];
 	SelectedNL::NLModelParams::InitVecDirect(directParams);
@@ -261,7 +414,7 @@ int main()
 
 	optim::algo_settings_t settings;
 	settings.gd_settings.method = 6;
-	settings.gd_settings.par_step_size = 0.0000025;
+	settings.gd_settings.par_step_size = 0.000001;
 	settings.gd_settings.par_adam_beta_1 = 0.9;
 	settings.gd_settings.par_adam_beta_2 = 0.999;
 	settings.iter_max = 2000000;

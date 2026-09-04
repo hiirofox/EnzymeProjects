@@ -5,9 +5,9 @@
 
 namespace NLModeling
 {
-	constexpr static int NumLayers = 8;
+	constexpr static int NumLayers = 6;
 	constexpr static int NLOrder = 4;
-	constexpr static int FiltOrder = 2;
+	constexpr static int FiltOrder = 4;
 	constexpr static int NumParams = NumLayers * NLOrder * (FiltOrder * 2 + 1);
 	struct NLModelParams
 	{
@@ -132,7 +132,7 @@ namespace NLModeling
 					float x0 = 1.0, x1 = x;
 					for (int j = 0; j < NLOrder; ++j)
 					{
-						float nlout = NonlinearSimple(x, x0, x1, j + 1);
+						float nlout = NonlinearMy(x, x0, x1, j + 1);
 						auto [pass, total] = ProcessLattice<0, FiltOrder, float>(nlout, zs[n][j], p.ks[n][j], p.gs[n][j]);
 						y += total;
 					}
@@ -146,18 +146,18 @@ namespace NLModeling
 
 namespace NLModelingGRU
 {
-	constexpr static int HiddenSize = 8;
+	constexpr static int HiddenSize = 12;
 
 	constexpr static int GateParams = HiddenSize + HiddenSize * HiddenSize + HiddenSize;
 	constexpr static int NumParams = GateParams * 3 + HiddenSize + 1;
 
-	constexpr static float InputScale = 8000.0f;
+	constexpr static float InputScale = 10000.0f;
 
-	constexpr static float InputWeightRange = 4000.0f;
-	constexpr static float RecurrentWeightRange = 1000.0f;
-	constexpr static float BiasRange = 6000.0f;
-	constexpr static float OutputWeightRange = 4000.0f;
-	constexpr static float OutputBiasRange = 2000.0f;
+	constexpr static float InputWeightRange = 10000.0f;
+	constexpr static float RecurrentWeightRange = 10000.0f;
+	constexpr static float BiasRange = 10000.0f;
+	constexpr static float OutputWeightRange = 10000.0f;
+	constexpr static float OutputBiasRange = 10000.0f;
 
 	/*
 	template<typename Sample>
