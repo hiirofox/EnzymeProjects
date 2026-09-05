@@ -63,8 +63,10 @@ void FFT(float* re, float* im, int inv)
 	}
 }
 #define SelectedNL NLModeling3
+
 constexpr static int NumParams = SelectedNL::NumParams;
 constexpr static int bootSize = 48000 / 20;//留一些采样供响应稳定
+constexpr static int delaySample = 1;//延迟一个采样让模型好优化
 int BatchSampleLen = 65536;
 //float* testX, * targetY;
 std::vector<float> testX, targetY;
@@ -102,7 +104,7 @@ void loss_wrapper(
 		{
 			tmpre1[j] = y[i + j] * window[j];
 			tmpim1[j] = 0.0f;
-			tmpre2[j] = targetY[i + j + startPos] * window[j];
+			tmpre2[j] = targetY[i + j + startPos - delaySample] * window[j];
 			tmpim2[j] = 0.0f;
 		}
 		FFT<WindowSize>(tmpre1, tmpim1, 0);
@@ -140,7 +142,7 @@ void loss_wrapper(
 	float target8 = 0.0;
 	for (int i = bootSize; i < batchLen; ++i)
 	{
-		const float t = targetY[i + startPos];
+		const float t = targetY[i + startPos - delaySample];
 		const float d = y[i] - t;
 		errSq += d * d;
 		errMax = std::max(errMax, fabsf(d));
@@ -167,7 +169,8 @@ void loss_wrapper(
 	const float targetR8 = powf(target8, 1.0 / 8.0);
 	const float timeSoftPeak = errR8 / (targetR8 + eps);
 
-	float loss = rms * 50.0 + timeSoftPeak * 100.0 + specSoftPeak * 50.0;
+	//float loss = rms * 50.0 + timeSoftPeak * 100.0 + specSoftPeak * 50.0;
+	float loss = specSoftPeak * 2000.0;
 
 	*outLoss = loss;
 	*specPeak = specSoftPeak;
@@ -302,6 +305,26 @@ public:
 };
 ADThreadPool adPool;
 int iter = 0;
+float bestLoss = 999999999;
+float bestParams[SelectedNL::NumParams];
+int newScoreFlag = 0;
+
+void SaveParams(float* params, int NumParams)
+{
+	FILE* pf = fopen("bestloss.txt", "w");
+	fprintf(pf, "%d %d %d\n", NumParams, NLModeling3::NumLayers, NLModeling3::FiltOrder);
+	for (int i = 0; i < NumParams; ++i)
+		fprintf(pf, "%.8f,", params[i]);
+	fclose(pf);
+}
+void ReadParams(float* params, int NumParams)
+{
+	FILE* pf = fopen("bestloss.txt", "r");
+	int n, tmp;
+	fscanf(pf, "%d %d %d", &n, &tmp, &tmp);
+	for (int i = 0; i < NumParams; ++i) fscanf(pf, "%f,", &params[i]);
+	fclose(pf);
+}
 double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data)
 {
 	Eigen::VectorXf params = x.cast<float>();
@@ -334,9 +357,24 @@ double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data
 	grad /= NumTasks;
 	if (grad_out)
 		*grad_out = grad.cast<double>();
+
+	if (sumLoss < bestLoss)
+	{
+		bestLoss = sumLoss;
+		for (int i = 0; i < SelectedNL::NumParams; ++i)
+			bestParams[i] = params[i];
+		newScoreFlag = 1;
+	}
 	if (iter % 1 == 0)
-		printf("Iter%5d loss=%03.5f specPeak=%03.5f rms=%03.5f max=%03.5f\n",
-			iter, sumLoss, sumSpecPeak, sumRms, sumMax);
+	{
+		printf("Iter%5d loss=%03.3f specPeak=%03.3f rms=%03.3f max=%03.3f %s\n",
+			iter, sumLoss, sumSpecPeak, sumRms, sumMax, newScoreFlag ? "(NEW!)" : "");
+		if (newScoreFlag)
+		{
+			SaveParams(params.data(), SelectedNL::NumParams);
+		}
+		newScoreFlag = 0;
+	}
 	++iter;
 	return sumLoss;
 }
@@ -448,29 +486,30 @@ int main()
 	printf("read ok. xrms=%.5f yrms=%.5f\n", xrms, yrms);
 
 	float directParams[NumParams];
-	SelectedNL::NLModelParams::InitVecDirect(directParams);
+	//SelectedNL::NLModelParams::InitVecDirect(directParams);
+	ReadParams(directParams, NumParams);
 	arma::vec x(NumParams);
 	for (int i = 0; i < NumParams; ++i)
 		x[i] = directParams[i];
 
 	EnsmallenObjective objectiveFunction;
 	float lrstart = 0.0001;
+	ens::Adam adam;
+	adam.StepSize() = lrstart;
+	adam.BatchSize() = 1;
+	adam.Beta1() = 0.9;
+	adam.Beta2() = 0.999;
+	adam.Epsilon() = 1e-8;
+	adam.MaxIterations() = 200;
+	adam.Tolerance() = 0.0;
+	adam.Shuffle() = false;
+	ens::L_BFGS lbfgs;
+	lbfgs.MaxIterations() = 20000;
 	for (;;)
 	{
 		iter = 0;
-		ens::Adam adam;
-		adam.StepSize() = lrstart;
-		adam.BatchSize() = 1;
-		adam.Beta1() = 0.9;
-		adam.Beta2() = 0.999;
-		adam.Epsilon() = 1e-8;
-		adam.MaxIterations() = 200;
-		adam.Tolerance() = 0.0;
-		adam.Shuffle() = false;
 		adam.Optimize(objectiveFunction, x);
 		iter = 0;
-		ens::L_BFGS lbfgs;
-		lbfgs.MaxIterations() = 50;
 		lbfgs.Optimize(objectiveFunction, x);
 	}
 }

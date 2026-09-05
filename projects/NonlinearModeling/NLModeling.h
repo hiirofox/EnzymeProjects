@@ -384,6 +384,7 @@ namespace NLModeling3
 	constexpr static int FiltOrder = 8;
 	constexpr static int ParamsPerLayer = FiltOrder * 2 + 1 + 5 + 3;
 	constexpr static int NumParams = NumLayers * ParamsPerLayer;
+	constexpr static float kScale = 0.9995;
 
 	struct NLModelParams
 	{
@@ -401,6 +402,11 @@ namespace NLModeling3
 		float gnlin[NumLayers];
 		float gnlout[NumLayers];
 
+		template<typename Sample>
+		static inline Sample Clip(Sample x, Sample lo, Sample hi)
+		{
+			return x < lo ? lo : (x > hi ? hi : x);
+		}
 		static void InitVecDirect(float* out)
 		{
 			int p = 0;
@@ -453,7 +459,7 @@ namespace NLModeling3
 			for (int layer = 0; layer < NumLayers; ++layer)
 			{
 				for (int i = 0; i < FiltOrder; ++i)
-					k[layer][i] = in[p++];
+					k[layer][i] = Clip(in[p++], -kScale, kScale);
 
 				for (int i = 0; i < FiltOrder; ++i)
 					gf[layer][i] = in[p++];
@@ -482,13 +488,9 @@ namespace NLModeling3
 		{
 			auto z0 = z[layer];
 			auto a = z0 * k[layer] + x;
-
-			auto [nextz, out] = ProcessLattice<layer + 1, Sample>(
-				a, z, k, gf, gfx);
-
+			auto [nextz, out] = ProcessLattice<layer + 1, Sample>(a, z, k, gf, gfx);
 			z[layer] = nextz;
 			auto y = a * -k[layer] + z0;
-
 			return { y, out + y * gf[layer] };
 		}
 	}
@@ -511,48 +513,30 @@ namespace NLModeling3
 					z[layer][i] = 0.0f;
 		}
 
-		static inline float Nonlinear(
-			float x, const NLModelParams& p, int layer)
+		static inline float Nonlinear(float x, const NLModelParams& p, int layer)
 		{
 			auto absx = std::abs(x);
-			auto num = x * (x * (x + p.a1[layer]) + p.a2[layer])
-				+ p.a3[layer];
-
+			auto num = x * (x * (x + p.a1[layer]) + p.a2[layer]) + p.a3[layer];
 			auto x2 = absx * absx;
-			auto den = p.b1[layer] * x2
-				+ p.b2[layer] * x2 * absx + 1.0f;
-
+			auto den = p.b1[layer] * x2 + p.b2[layer] * x2 * absx + 1.0f;
 			return num / den;
 		}
 
-		inline float ProcessCell(
-			float x, const NLModelParams& p, int layer)
+		inline float ProcessCell(float x, const NLModelParams& p, int layer)
 		{
 			auto [nextz, latticeOut] = ProcessLattice<0, float>(
 				x, z[layer], p.k[layer], p.gf[layer], p.gfx[layer]);
-
-			(void)nextz;
-
-			auto nlo = Nonlinear(
-				latticeOut * p.gnlin[layer], p, layer);
-
-			return x * p.gdry[layer]
-				+ nlo * p.gnlout[layer];
+			auto nlo = Nonlinear(latticeOut * p.gnlin[layer], p, layer);
+			return x * p.gdry[layer] + nlo * p.gnlout[layer];
 		}
 
-		void ProcessBlock(
-			NLModelParams& p,
-			const float* in,
-			float* out,
-			int NumSamples)
+		void ProcessBlock(NLModelParams& p, const float* in, float* out, int NumSamples)
 		{
 			for (int i = 0; i < NumSamples; ++i)
 			{
 				float x = in[i];
-
 				for (int layer = 0; layer < NumLayers; ++layer)
 					x = ProcessCell(x, p, layer);
-
 				out[i] = x;
 			}
 		}
@@ -839,6 +823,188 @@ namespace NLModelingGRU
 					y += p.wo[j] * hs[j];
 
 				out[i] = Clip(y, -1.0f, 1.0f);
+			}
+		}
+	};
+}
+
+namespace NLModeling4//NLModeling4 powered by ai!
+{
+	constexpr static int NumLayers = 12;
+
+	constexpr static int ParamsPerLayer = 15;
+	constexpr static int NumParams = NumLayers * ParamsPerLayer;
+	constexpr static float PoleScale = 0.9999f;
+
+	static inline float MapPole(float x)
+	{
+		return PoleScale * std::tanh(x);
+	}
+
+	static inline float UnmapPole(float x)
+	{
+		return std::atanh(x / PoleScale);
+	}
+
+	struct NLModelParams
+	{
+		float p1[NumLayers], p2[NumLayers];
+		float g1[NumLayers], g2[NumLayers];
+
+		float pe[NumLayers];
+		float gbias[NumLayers];
+		float gin[NumLayers];
+
+		float a1[NumLayers], a2[NumLayers];
+		float b1[NumLayers], b2[NumLayers];
+
+		float pp[NumLayers];
+		float gp[NumLayers];
+
+		float gdry[NumLayers];
+		float gout[NumLayers];
+
+		static void InitVecDirect(float* out)
+		{
+			int p = 0;
+
+			for (int i = 0; i < NumLayers; ++i)
+			{
+				out[p++] = UnmapPole(0.5f);
+				out[p++] = UnmapPole(0.95f);
+
+				out[p++] = 0.0f;
+				out[p++] = 0.0f;
+
+				out[p++] = UnmapPole(0.999f);
+				out[p++] = 0.0f;
+				out[p++] = 1.0f;
+
+				out[p++] = 0.0f;
+				out[p++] = 1.0f;
+				out[p++] = 0.0f;
+				out[p++] = 1.0f;
+
+				out[p++] = UnmapPole(0.5f);
+				out[p++] = 0.0f;
+
+				out[p++] = 0.0f;
+				out[p++] = 1.0f;
+			}
+		}
+
+		void ParamsToVec(float* out) const
+		{
+			int p = 0;
+
+			for (int i = 0; i < NumLayers; ++i)
+			{
+				out[p++] = UnmapPole(p1[i]);
+				out[p++] = UnmapPole(p2[i]);
+
+				out[p++] = g1[i];
+				out[p++] = g2[i];
+
+				out[p++] = UnmapPole(pe[i]);
+				out[p++] = gbias[i];
+				out[p++] = gin[i];
+
+				out[p++] = a1[i];
+				out[p++] = a2[i];
+				out[p++] = b1[i];
+				out[p++] = b2[i];
+
+				out[p++] = UnmapPole(pp[i]);
+				out[p++] = gp[i];
+
+				out[p++] = gdry[i];
+				out[p++] = gout[i];
+			}
+		}
+
+		void VecToParams(const float* in)
+		{
+			int p = 0;
+
+			for (int i = 0; i < NumLayers; ++i)
+			{
+				p1[i] = MapPole(in[p++]);
+				p2[i] = MapPole(in[p++]);
+
+				g1[i] = in[p++];
+				g2[i] = in[p++];
+
+				pe[i] = MapPole(in[p++]);
+				gbias[i] = in[p++];
+				gin[i] = in[p++];
+
+				a1[i] = in[p++];
+				a2[i] = in[p++];
+				b1[i] = in[p++];
+				b2[i] = in[p++];
+
+				pp[i] = MapPole(in[p++]);
+				gp[i] = in[p++];
+
+				gdry[i] = in[p++];
+				gout[i] = in[p++];
+			}
+		}
+	};
+
+	class NLModelProcess
+	{
+		float z1[NumLayers];
+		float z2[NumLayers];
+		float ze[NumLayers];
+		float zp[NumLayers];
+
+	public:
+		NLModelProcess()
+		{
+			Init();
+		}
+
+		void Init()
+		{
+			for (int i = 0; i < NumLayers; ++i)
+			{
+				z1[i] = 0.0f;
+				z2[i] = 0.0f;
+				ze[i] = 0.0f;
+				zp[i] = 0.0f;
+			}
+		}
+
+		static inline float Nonlinear(float x, const NLModelParams& p, int i)
+		{
+			float x2 = x * x;
+			float num = x * (1.0f + p.a1[i] * x + p.a2[i] * x2);
+			float den = 1.0f + p.b1[i] * std::abs(x) + p.b2[i] * x2;
+			return num / den;
+		}
+
+		inline float ProcessCell(float x, const NLModelParams& p, int i)
+		{
+			z1[i] = p.p1[i] * z1[i] + (1.0f - p.p1[i]) * x;
+			z2[i] = p.p2[i] * z2[i] + (1.0f - p.p2[i]) * x;
+			float u = x + p.g1[i] * (z1[i] - x) + p.g2[i] * (z2[i] - x);
+			ze[i] = p.pe[i] * ze[i] + (1.0f - p.pe[i]) * std::abs(u);
+			float v = u * p.gin[i] + ze[i] * p.gbias[i];
+			float n = Nonlinear(v, p, i);
+			zp[i] = p.pp[i] * zp[i] + (1.0f - p.pp[i]) * n;
+			float y = n + p.gp[i] * (zp[i] - n);
+			return x * p.gdry[i] + y * p.gout[i];
+		}
+
+		void ProcessBlock(NLModelParams& p, const float* in, float* out, int NumSamples)
+		{
+			for (int i = 0; i < NumSamples; ++i)
+			{
+				float x = in[i];
+				for (int layer = 0; layer < NumLayers; ++layer)
+					x = ProcessCell(x, p, layer);
+				out[i] = x;
 			}
 		}
 	};
