@@ -66,7 +66,7 @@ void FFT(float* re, float* im, int inv)
 
 constexpr static int NumParams = SelectedNL::NumParams;
 constexpr static int bootSize = 48000 / 20;//留一些采样供响应稳定
-constexpr static int delaySample = 1;//延迟一个采样让模型好优化
+constexpr static int delaySample = 1;//延迟一些采样让模型好优化，而不是学预测
 int BatchSampleLen = 65536;
 //float* testX, * targetY;
 std::vector<float> testX, targetY;
@@ -170,7 +170,8 @@ void loss_wrapper(
 	const float timeSoftPeak = errR8 / (targetR8 + eps);
 
 	//float loss = rms * 50.0 + timeSoftPeak * 100.0 + specSoftPeak * 50.0;
-	float loss = specSoftPeak * 2000.0;
+	float loss = rms * 10.0 + timeSoftPeak * 10.0 + specSoftPeak * 180.0;
+	//float loss = specSoftPeak * 2000.0;
 
 	*outLoss = loss;
 	*specPeak = specSoftPeak;
@@ -458,7 +459,8 @@ int main()
 	//targetY.resize(BatchSampleLen);
 	//GenerateTestData(testX.data(), targetY.data(), BatchSampleLen);
 
-	std::string root = "/home/hiirofox/TestEnzyme/projects/NonlinearModeling/builds/";
+	//std::string root = "/home/hiirofox/TestEnzyme/projects/NonlinearModeling/builds/";
+	std::string root = "";
 	wr.OpenWAV(root + "input.wav");
 	BatchSampleLen = wr.GetNumSamples();
 	printf("wav NumSamples:%d\n", BatchSampleLen);
@@ -493,7 +495,7 @@ int main()
 		x[i] = directParams[i];
 
 	EnsmallenObjective objectiveFunction;
-	float lrstart = 0.0001;
+	float lrstart = 0.001;
 	ens::Adam adam;
 	adam.StepSize() = lrstart;
 	adam.BatchSize() = 1;
@@ -504,11 +506,11 @@ int main()
 	adam.Tolerance() = 0.0;
 	adam.Shuffle() = false;
 	ens::L_BFGS lbfgs;
-	lbfgs.MaxIterations() = 20000;
+	lbfgs.MaxIterations() = 10000;
 	for (;;)
 	{
-		iter = 0;
-		adam.Optimize(objectiveFunction, x);
+		//iter = 0;
+		//adam.Optimize(objectiveFunction, x);
 		iter = 0;
 		lbfgs.Optimize(objectiveFunction, x);
 	}

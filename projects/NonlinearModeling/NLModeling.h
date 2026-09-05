@@ -513,11 +513,12 @@ namespace NLModeling3
 					z[layer][i] = 0.0f;
 		}
 
-		static inline float Nonlinear(float x, const NLModelParams& p, int layer)
+		static inline float Nonlinear(
+			float x, const NLModelParams& p, int layer)
 		{
+			auto x2 = x * x;
 			auto absx = std::abs(x);
-			auto num = x * (x * (x + p.a1[layer]) + p.a2[layer]) + p.a3[layer];
-			auto x2 = absx * absx;
+			auto num = x * (x * (x + p.a1[layer]) + p.a2[layer] + p.a3[layer] * absx);
 			auto den = p.b1[layer] * x2 + p.b2[layer] * x2 * absx + 1.0f;
 			return num / den;
 		}
