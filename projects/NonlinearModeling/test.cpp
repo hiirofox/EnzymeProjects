@@ -66,7 +66,7 @@ void FFT(float* re, float* im, int inv)
 
 constexpr static int NumParams = SelectedNL::NumParams;
 constexpr static int bootSize = 48000 / 20;//留一些采样供响应稳定
-constexpr static int delaySample = 1;//延迟一些采样让模型好优化，而不是学预测
+constexpr static int delaySample = 0;//延迟一些采样让模型好优化，而不是学预测
 int BatchSampleLen = 65536;
 //float* testX, * targetY;
 std::vector<float> testX, targetY;
@@ -148,8 +148,13 @@ void loss_wrapper(
 	float target8 = 0.0;
 	for (int i = bootSize; i < batchLen; ++i)
 	{
-		const float t = targetY[i + startPos - delaySample];
-		const float d = y[i] - t;
+		int targIdx = i + startPos - delaySample;
+		float vty = targetY[targIdx] - 0.85 * targetY[targIdx - 1];//hp
+		float vy = y[i] - 0.85 * y[i - 1];//hp
+		//float vty = targetY[targIdx];
+		//float vy = y[i];
+		const float t = vty;
+		const float d = vy - vty;
 		errSq += d * d;
 		errMax = std::max(errMax, fabsf(d));
 		targetSq += t * t;
@@ -176,8 +181,9 @@ void loss_wrapper(
 	const float timeSoftPeak = errR8 / (targetR8 + eps);
 
 	//float loss = rms * 50.0 + timeSoftPeak * 100.0 + specSoftPeak * 50.0;
-	float loss = rms * 10.0 + timeSoftPeak * 10.0 + specSoftPeak * 180.0;
-	//float loss = specSoftPeak * 2000.0;
+	//float loss = rms * 10.0 + timeSoftPeak * 10.0 + specSoftPeak * 180.0;
+	//float loss = specSoftPeak * 200.0;
+	float loss = timeSoftPeak * 200.0;
 
 	*outLoss = loss;
 	*specPeak = specSoftPeak;
@@ -515,14 +521,14 @@ int main()
 		bestParams[i] = x[i] = directParams[i];
 
 	EnsmallenObjective objectiveFunction;
-	float lrstart = 0.001;
+	float lrstart = 0.1;
 	ens::Adam adam;
 	adam.StepSize() = lrstart;
 	adam.BatchSize() = 1;
 	adam.Beta1() = 0.9;
 	adam.Beta2() = 0.999;
 	adam.Epsilon() = 1e-8;
-	adam.MaxIterations() = 200;
+	adam.MaxIterations() = 300;
 	adam.Tolerance() = 0.0;
 	adam.Shuffle() = false;
 	ens::L_BFGS lbfgs;

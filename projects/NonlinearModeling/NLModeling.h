@@ -550,7 +550,7 @@ namespace NLModeling3
 namespace NLModelingGRU
 {
 	constexpr static int NumInputs = 1;
-	constexpr static int NumHiddens = 6;
+	constexpr static int NumHiddens = 8;
 
 	constexpr static int NumParams =
 		3 * NumHiddens * NumInputs +
@@ -575,6 +575,7 @@ namespace NLModelingGRU
 		{
 			static std::mt19937 rng(12345);
 			static std::normal_distribution<float> nd(0.0f, 1.0f);
+			int p = 0;
 			auto R = [&](float m, float s)
 				{
 					return std::clamp(m + s * nd(rng), m - 2.0f * s, m + 2.0f * s);
@@ -583,7 +584,6 @@ namespace NLModelingGRU
 				{
 					for (int i = 0; i < n; ++i)out[p++] = R(m, s);
 				};
-			int p = 0;
 			F(NumHiddens * NumInputs, 0.363f, 0.447f); // wr
 			F(NumHiddens * NumInputs, 0.115f, 0.402f); // wz
 			F(NumHiddens * NumInputs, 0.071f, 0.585f); // wh
