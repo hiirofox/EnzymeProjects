@@ -66,7 +66,8 @@ void FFT(float* re, float* im, int inv)
 
 constexpr static int NumParams = SelectedNL::NumParams;
 constexpr static int bootSize = 48000 / 20;//留一些采样供响应稳定
-constexpr static int delaySample = 2;//延迟一些采样让模型好优化，而不是学预测
+constexpr static int delaySample = SelectedNL::NLModelProcess::GetTargetDelaySample();
+//延迟一些采样让模型好优化，而不是学预测
 //典型值：灰盒1sample，gru 2sample
 int BatchSampleLen = 65536;
 //float* testX, * targetY;

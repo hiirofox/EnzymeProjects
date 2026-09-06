@@ -544,6 +544,11 @@ namespace NLModeling3
 				out[i] = x;
 			}
 		}
+
+		static int GetTargetDelaySample()
+		{
+			return 1;
+		}
 	};
 }
 
@@ -691,6 +696,7 @@ namespace NLModelingGRU
 		std::array<float, NumHiddens> s1o{ 0 };
 		std::array<float, NumHiddens> s2o{ 0 };
 		std::array<float, NumHiddens> tho{ 0 };
+		float xz1 = 0, xz2 = 0;
 		inline static float Tanh(float x)
 		{
 			//return tanhf(x);
@@ -704,6 +710,7 @@ namespace NLModelingGRU
 		void Init()
 		{
 			for (auto& v : h)v = 0;
+			xz1 = xz2 = 0;
 		}
 		void SetRuntimeParams(float* inputp)
 		{
@@ -775,8 +782,15 @@ namespace NLModelingGRU
 				//out
 				float v = 0;
 				for (int n = 0; n < NumHiddens; ++n) v += h[n] * p.wo[n];
-				out[i] = v + p.b;
+
+				out[i] = v - xz2 + p.b;
+				xz2 = xz1;
+				xz1 = in[i];
 			}
+		}
+		int GetTargetDelaySample()
+		{
+			return 2;
 		}
 	};
 }
