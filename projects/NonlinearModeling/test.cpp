@@ -66,7 +66,8 @@ void FFT(float* re, float* im, int inv)
 
 constexpr static int NumParams = SelectedNL::NumParams;
 constexpr static int bootSize = 48000 / 20;//留一些采样供响应稳定
-constexpr static int delaySample = 0;//延迟一些采样让模型好优化，而不是学预测
+constexpr static int delaySample = 2;//延迟一些采样让模型好优化，而不是学预测
+//典型值：灰盒1sample，gru 2sample
 int BatchSampleLen = 65536;
 //float* testX, * targetY;
 std::vector<float> testX, targetY;
@@ -116,11 +117,11 @@ void loss_wrapper(
 			float mag1 = tmpre1[j] * tmpre1[j] + tmpim1[j] * tmpim1[j];
 			float mag2 = tmpre2[j] * tmpre2[j] + tmpim2[j] * tmpim2[j];
 
-			//float d = logf(mag1) - logf(mag2);
-			//float d2 = d * d * 0.000001;
-			//sumd8 += d2;
+			float d = logf(mag1 + 1e-2) - logf(mag2 + 1e-2);
+			float d2 = d * d * 0.000001;
+			sumd8 += d2;
 
-
+			/*
 			float d = mag1 - mag2;
 			float d2 = d * d * 0.0001f;
 			float d4 = d2 * d2;
@@ -131,13 +132,13 @@ void loss_wrapper(
 			float t4 = t2 * t2;
 			float t8 = t4 * t4;
 			sumt8 += t8;
-
+			*/
 		}
 	}
-	sumd8 = powf(sumd8, 1.0 / 8.0);
-	sumt8 = powf(sumt8, 1.0 / 8.0);
-	float specSoftPeak = sumd8 / (sumt8 + 1e-3);
-	//float specSoftPeak = sumd8;
+	//sumd8 = powf(sumd8, 1.0 / 8.0);
+	//sumt8 = powf(sumt8, 1.0 / 8.0);
+	//float specSoftPeak = sumd8 / (sumt8 + 1e-3);
+	float specSoftPeak = sumd8;
 
 	float errSq = 0.0f;
 	float errMax = 0.0f;
@@ -181,9 +182,9 @@ void loss_wrapper(
 	const float timeSoftPeak = errR8 / (targetR8 + eps);
 
 	//float loss = rms * 50.0 + timeSoftPeak * 100.0 + specSoftPeak * 50.0;
-	//float loss = rms * 10.0 + timeSoftPeak * 10.0 + specSoftPeak * 180.0;
+	float loss = rms * 10.0 + timeSoftPeak * 10.0 + specSoftPeak * 180.0;
 	//float loss = specSoftPeak * 200.0;
-	float loss = timeSoftPeak * 200.0;
+	//float loss = timeSoftPeak * 200.0;
 
 	*outLoss = loss;
 	*specPeak = specSoftPeak;
@@ -514,6 +515,7 @@ int main()
 	printf("read ok. xrms=%.5f yrms=%.5f\n", xrms, yrms);
 
 	float directParams[NumParams];
+	//SelectedNL::NLModelParams::InitVecRandom2(directParams);
 	//SelectedNL::NLModelParams::InitVecDirect(directParams);
 	ReadParams(directParams, NumParams);
 	arma::vec x(NumParams);
@@ -521,7 +523,7 @@ int main()
 		bestParams[i] = x[i] = directParams[i];
 
 	EnsmallenObjective objectiveFunction;
-	float lrstart = 0.1;
+	float lrstart = 0.001;
 	ens::Adam adam;
 	adam.StepSize() = lrstart;
 	adam.BatchSize() = 1;
@@ -532,7 +534,7 @@ int main()
 	adam.Tolerance() = 0.0;
 	adam.Shuffle() = false;
 	ens::L_BFGS lbfgs;
-	lbfgs.MaxIterations() = 150;
+	lbfgs.MaxIterations() = 300;
 	for (;;)
 	{
 		iter = 0;

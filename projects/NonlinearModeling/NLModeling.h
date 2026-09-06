@@ -571,7 +571,7 @@ namespace NLModelingGRU
 		std::array<float, NumHiddens> wo;
 		float b;
 
-		static void InitVecDirect(float* out)
+		static void InitVecRandom(float* out)
 		{
 			static std::mt19937 rng(12345);
 			static std::normal_distribution<float> nd(0.0f, 1.0f);
@@ -595,6 +595,59 @@ namespace NLModelingGRU
 			F(NumHiddens, 0.051f, 0.117f); // bh
 			F(NumHiddens, 0.125f, 0.677f); // wo
 			out[p++] = 0.0f; // b
+		}
+		static void InitVecRandom2(float* out)
+		{
+			std::mt19937 rng(31415926);
+			auto Rand = [&](float a)
+				{
+					std::uniform_real_distribution<float> d(-a, a);
+					return d(rng);
+				};
+			NLModelParams p;
+			const float wi = std::sqrt(6.0f / (NumInputs + NumHiddens));
+			const float wh = std::sqrt(6.0f / (NumHiddens + NumHiddens));
+			const float wo = std::sqrt(6.0f / (NumHiddens + 1));
+			for (int i = 0; i < NumHiddens; ++i)
+			{
+				for (int j = 0; j < NumInputs; ++j)
+				{
+					p.wr[i][j] = Rand(wi);
+					p.wz[i][j] = Rand(wi);
+					p.wh[i][j] = Rand(wi);
+				}
+				for (int j = 0; j < NumHiddens; ++j)
+				{
+					p.ur[i][j] = Rand(wh);
+					p.uz[i][j] = Rand(wh);
+					p.uh[i][j] = Rand(wh);
+				}
+				p.br[i] = 0.0f;
+				p.bz[i] = 1.0f;
+				p.bh[i] = 0.0f;
+				p.wo[i] = Rand(wo);
+			}
+			p.b = 0.0f;
+			p.ParamsToVec(out);
+		}
+		static void InitVecDirect(float* out)
+		{
+			int p = 0;
+			constexpr float s = 0.1f;
+			for (int i = 0; i < NumHiddens; ++i)
+				for (int j = 0; j < NumInputs; ++j)	out[p++] = 0.0f;
+			for (int i = 0; i < NumHiddens; ++i)
+				for (int j = 0; j < NumInputs; ++j)	out[p++] = 0.0f;
+			for (int i = 0; i < NumHiddens; ++i)
+				for (int j = 0; j < NumInputs; ++j)	out[p++] = (i == 0 && j == 0) ? s : 0.0f;
+			for (int i = 0; i < NumHiddens * NumHiddens; ++i)out[p++] = 0.0f;
+			for (int i = 0; i < NumHiddens * NumHiddens; ++i)out[p++] = 0.0f;
+			for (int i = 0; i < NumHiddens * NumHiddens; ++i)out[p++] = 0.0f;
+			for (int i = 0; i < NumHiddens; ++i)out[p++] = 0.0f;
+			for (int i = 0; i < NumHiddens; ++i)out[p++] = -8.0f;
+			for (int i = 0; i < NumHiddens; ++i)out[p++] = 0.0f;
+			for (int i = 0; i < NumHiddens; ++i)out[p++] = (i == 0) ? 1.0f / s : 0.0f;
+			out[p++] = 0.0f;
 		}
 		void ParamsToVec(float* out) const
 		{
@@ -640,11 +693,12 @@ namespace NLModelingGRU
 		std::array<float, NumHiddens> tho{ 0 };
 		inline static float Tanh(float x)
 		{
-			return tanhf(x);
+			//return tanhf(x);
+			return x / (1.0f + x * x) + 0.125f * x;
 		}
 		inline static float Sigmoid(float x)
 		{
-			return 0.5f * (tanhf(0.5f * x) + 1.0f);
+			return 0.5f * (Tanh(0.5f * x) + 1.0f);
 		}
 	public:
 		void Init()
