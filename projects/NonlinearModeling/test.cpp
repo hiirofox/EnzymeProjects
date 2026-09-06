@@ -62,7 +62,7 @@ void FFT(float* re, float* im, int inv)
 		}
 	}
 }
-#define SelectedNL NLModeling3
+#define SelectedNL NLModelingGRU
 
 constexpr static int NumParams = SelectedNL::NumParams;
 constexpr static int bootSize = 48000 / 20;//留一些采样供响应稳定
@@ -116,22 +116,28 @@ void loss_wrapper(
 			float mag1 = tmpre1[j] * tmpre1[j] + tmpim1[j] * tmpim1[j];
 			float mag2 = tmpre2[j] * tmpre2[j] + tmpim2[j] * tmpim2[j];
 
+			//float d = logf(mag1) - logf(mag2);
+			//float d2 = d * d * 0.000001;
+			//sumd8 += d2;
+
+
 			float d = mag1 - mag2;
 			float d2 = d * d * 0.0001f;
 			float d4 = d2 * d2;
 			float d8 = d4 * d4;
 			sumd8 += d8;
-
 			float t = mag2;
 			float t2 = t * t * 0.0001f;
 			float t4 = t2 * t2;
 			float t8 = t4 * t4;
 			sumt8 += t8;
+
 		}
 	}
 	sumd8 = powf(sumd8, 1.0 / 8.0);
 	sumt8 = powf(sumt8, 1.0 / 8.0);
 	float specSoftPeak = sumd8 / (sumt8 + 1e-3);
+	//float specSoftPeak = sumd8;
 
 	float errSq = 0.0f;
 	float errMax = 0.0f;
@@ -215,7 +221,7 @@ std::tuple<float, float, float, float > get_gradient(const float* params, float*
 }
 
 const int NumTasks = 12;
-int numTrainBlocks = NumTasks;
+int numTrainBlocks = 100;
 std::vector<int> blockStart;
 std::vector<int> blockLen;
 class ADThreadPool
@@ -304,16 +310,17 @@ public:
 		return results[id];
 	}
 };
-ADThreadPool adPool;
+//ADThreadPool adPool;
 int iter = 0;
 float bestLoss = 999999999;
+float smoothLoss = 200.0;
 float bestParams[SelectedNL::NumParams];
 int newScoreFlag = 0;
 
 void SaveParams(float* params, int NumParams)
 {
 	FILE* pf = fopen("bestloss.txt", "w");
-	fprintf(pf, "%d %d %d\n", NumParams, NLModeling3::NumLayers, NLModeling3::FiltOrder);
+	fprintf(pf, "%d\n", NumParams);
 	for (int i = 0; i < NumParams; ++i)
 		fprintf(pf, "%.8f,", params[i]);
 	fclose(pf);
@@ -322,24 +329,23 @@ void ReadParams(float* params, int NumParams)
 {
 	FILE* pf = fopen("bestloss.txt", "r");
 	int n, tmp;
-	fscanf(pf, "%d %d %d", &n, &tmp, &tmp);
+	fscanf(pf, "%d", &n);
 	for (int i = 0; i < NumParams; ++i) fscanf(pf, "%f,", &params[i]);
 	fclose(pf);
 }
 double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data)
 {
 	Eigen::VectorXf params = x.cast<float>();
-	adPool.SetParams(params.data());
-
-	for (int i = 0; i < NumTasks; ++i)
-		adPool.AddTask(i, blockStart[i], blockLen[i]);
-
 	float sumLoss = 0.0f;
 	float sumSpecPeak = 0.0f;
 	float sumRms = 0.0f;
 	float sumMax = 0.0f;
 	Eigen::VectorXf grad = Eigen::VectorXf::Zero(NumParams);
 
+	/*
+	adPool.SetParams(params.data());
+	for (int i = 0; i < NumTasks; ++i)
+		adPool.AddTask(i, blockStart[i], blockLen[i]);
 	for (int i = 0; i < NumTasks; ++i)
 	{
 		auto result = adPool.GetResult(i);
@@ -350,12 +356,26 @@ double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data
 		sumMax += max;
 		grad += result.grad;
 	}
-
 	sumLoss /= NumTasks;
 	sumSpecPeak /= NumTasks;
 	sumRms /= NumTasks;
 	sumMax /= NumTasks;
 	grad /= NumTasks;
+	*/
+	//int selectBlockID = rand() % numTrainBlocks;
+	int selectBlockID = 0;
+	auto [loss, specPeak, rmsValue, maxValue] =
+		get_gradient(params.data(), grad.data(), NumParams, blockStart[selectBlockID], blockLen[selectBlockID]);
+
+	//if (iter == 0)smoothLoss = loss;
+	//if (!std::isinf(loss) && !std::isnan(loss))
+	//	smoothLoss += 0.0125 * (loss - smoothLoss);
+	//sumLoss = smoothLoss;
+	sumLoss = loss;
+	sumSpecPeak = specPeak;
+	sumRms = rmsValue;
+	sumMax = maxValue;
+
 	if (grad_out)
 		*grad_out = grad.cast<double>();
 
@@ -366,7 +386,7 @@ double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data
 			bestParams[i] = params[i];
 		newScoreFlag = 1;
 	}
-	if (iter % 1 == 0)
+	if (iter % 5 == 0)
 	{
 		printf("Iter%5d loss=%03.3f specPeak=%03.3f rms=%03.3f max=%03.3f %s\n",
 			iter, sumLoss, sumSpecPeak, sumRms, sumMax, newScoreFlag ? "(NEW!)" : "");
@@ -392,8 +412,8 @@ float WindowFunc(float x)//nice window near Harries-Blackman
 }
 int SegmentBlock(std::vector<float>& samples, int numSamples, std::vector<int>& start, std::vector<int>& len)
 {
-	int blockSize = numSamples / NumTasks;
-	for (int i = 0; i < NumTasks; ++i)
+	int blockSize = numSamples / numTrainBlocks;
+	for (int i = 0; i < numTrainBlocks; ++i)
 	{
 		printf("block:%d:%d (%.2fs)\n", blockSize * i, blockSize, blockSize / 48000.0);
 		int startPos = blockSize * i;
@@ -480,7 +500,7 @@ int main()
 		yrms += targetY[i] * targetY[i] * 0.01;
 	}
 	yAvgEnergy = yrms / BatchSampleLen / 0.0001;
-	numTrainBlocks = SegmentBlock(testX, BatchSampleLen, blockStart, blockLen);
+	SegmentBlock(testX, BatchSampleLen, blockStart, blockLen);
 
 	xrms = sqrtf(xrms / 0.0001);
 	yrms = sqrtf(yrms / 0.0001);
@@ -492,7 +512,7 @@ int main()
 	ReadParams(directParams, NumParams);
 	arma::vec x(NumParams);
 	for (int i = 0; i < NumParams; ++i)
-		x[i] = directParams[i];
+		bestParams[i] = x[i] = directParams[i];
 
 	EnsmallenObjective objectiveFunction;
 	float lrstart = 0.001;
@@ -506,12 +526,14 @@ int main()
 	adam.Tolerance() = 0.0;
 	adam.Shuffle() = false;
 	ens::L_BFGS lbfgs;
-	lbfgs.MaxIterations() = 10000;
+	lbfgs.MaxIterations() = 150;
 	for (;;)
 	{
-		//iter = 0;
-		//adam.Optimize(objectiveFunction, x);
+		iter = 0;
+		adam.Optimize(objectiveFunction, x);
+		for (int i = 0; i < NumParams; ++i) x[i] = bestParams[i];
 		iter = 0;
 		lbfgs.Optimize(objectiveFunction, x);
+		for (int i = 0; i < NumParams; ++i) x[i] = bestParams[i];
 	}
 }
