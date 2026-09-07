@@ -62,7 +62,7 @@ void FFT(float* re, float* im, int inv)
 		}
 	}
 }
-#define SelectedNL NLModelingGRU
+#define SelectedNL NLModeling4
 
 constexpr static int NumParams = SelectedNL::NumParams;
 constexpr static int bootSize = 48000 / 20;//留一些采样供响应稳定
@@ -531,18 +531,23 @@ int main()
 	adam.Beta1() = 0.9;
 	adam.Beta2() = 0.999;
 	adam.Epsilon() = 1e-8;
-	adam.MaxIterations() = 300;
+	adam.MaxIterations() = 0;
 	adam.Tolerance() = 0.0;
 	adam.Shuffle() = false;
 	ens::L_BFGS lbfgs;
 	lbfgs.MaxIterations() = 300;
 	for (;;)
 	{
+		float adamloss = bestLoss;
 		iter = 0;
 		adam.Optimize(objectiveFunction, x);
 		for (int i = 0; i < NumParams; ++i) x[i] = bestParams[i];
+		printf("adam loss: %.3f->%.3f (%.3f%%)\n", adamloss, bestLoss, (adamloss - bestLoss) / adamloss*100.0);
+		
+		float lbfgsloss = bestLoss;
 		iter = 0;
 		lbfgs.Optimize(objectiveFunction, x);
 		for (int i = 0; i < NumParams; ++i) x[i] = bestParams[i];
+		printf("adam loss: %.3f->%.3f (%.3f%%)\n", lbfgsloss, bestLoss, (lbfgsloss - bestLoss) / lbfgsloss * 100.0);
 	}
 }

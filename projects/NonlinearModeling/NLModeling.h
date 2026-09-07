@@ -794,10 +794,9 @@ namespace NLModelingGRU
 
 namespace NLModeling4//NLModeling4 powered by ai!
 {
-	constexpr static int NumLayers = 12;
+	constexpr static int NumLayers = 16;
 
-	constexpr static int ParamsPerLayer = 15;
-	constexpr static int NumParams = NumLayers * ParamsPerLayer;
+	constexpr static int NumParams = NumLayers * 15;
 	constexpr static float PoleScale = 0.9999f;
 
 	static inline float MapPole(float x)
@@ -950,8 +949,10 @@ namespace NLModeling4//NLModeling4 powered by ai!
 
 		inline float ProcessCell(float x, const NLModelParams& p, int i)
 		{
-			z1[i] = p.p1[i] * z1[i] + (1.0f - p.p1[i]) * x;
-			z2[i] = p.p2[i] * z2[i] + (1.0f - p.p2[i]) * x;
+			//z1[i] = p.p1[i] * z1[i] + (1.0f - p.p1[i]) * x;
+			//z2[i] = p.p2[i] * z2[i] + (1.0f - p.p2[i]) * x;
+			z1[i] += (1.0 - p.p1[i]) * (x - z1[i]);
+			z2[i] += (1.0 - p.p2[i]) * (x - z2[i]);
 			float u = x + p.g1[i] * (z1[i] - x) + p.g2[i] * (z2[i] - x);
 			ze[i] = p.pe[i] * ze[i] + (1.0f - p.pe[i]) * std::abs(u);
 			float v = u * p.gin[i] + ze[i] * p.gbias[i];
@@ -970,6 +971,268 @@ namespace NLModeling4//NLModeling4 powered by ai!
 					x = ProcessCell(x, p, layer);
 				out[i] = x;
 			}
+		}
+		constexpr static int GetTargetDelaySample()
+		{
+			return 3;
+		}
+	};
+}
+
+namespace NLModelingStateCell
+{
+	constexpr static int NumLayers = 8;
+	constexpr static int NumInputParams = 0;
+	constexpr static int NumParams = NumLayers * 19;
+	struct NLModelParams
+	{
+		//低通4个输入的速度
+		float vx[NumLayers];
+		float va[NumLayers];
+		float vo[NumLayers];
+		float vabsx[NumLayers];
+		//低通输出的幅度
+		float gx[NumLayers];
+		float ga[NumLayers];
+		float go[NumLayers];
+		//lp absx调制非线性的工作点，即混合前加调制
+		float acxg[NumLayers];//absx control x gain
+		float acag[NumLayers];
+		float acog[NumLayers];
+		float acmixdc[NumLayers];//absx control mix dc
+		//nonlinear
+		float a1[NumLayers];
+		float a2[NumLayers];
+		float b1[NumLayers];
+		float b2[NumLayers];
+		//out gain
+		float ag[NumLayers];
+		float og[NumLayers];
+		//pass
+		float adry[NumLayers];
+		float odry[NumLayers];
+
+		static void InitVecDirect(float* out)
+		{
+			int n = 0;
+			constexpr float tilt = 0.03f;
+			constexpr float center = 0.5f * (NumLayers - 1);
+			for (int i = 0; i < NumLayers; ++i)
+			{
+				out[n++] = 1.0f; // vx
+				out[n++] = 0.25f; // va
+				out[n++] = 0.25f; // vo
+				const float tauSamples = float(16 << i);
+				const float venv = 1.0f - std::exp(-1.0f / tauSamples);
+				out[n++] = venv; // vabsx
+				out[n++] = 1.0f; // gx : x path ON
+				out[n++] = 0.0f; // ga : recurrent a path OFF
+				out[n++] = 0.0f; // go : recurrent o path OFF
+				out[n++] = 0.0f; // acxg
+				out[n++] = 0.0f; // acag
+				out[n++] = 0.0f; // acog
+				out[n++] = 0.0f; // acmixdc
+				out[n++] = 0.0f; // a1
+				out[n++] = 0.0f; // a2
+				out[n++] = 0.0f; // b1
+				out[n++] = 0.0f; // b2
+				out[n++] = 0.0f; // ag
+				const float rawWeight = 1.0f + tilt * (float(i) - center);
+				out[n++] = rawWeight / float(NumLayers); // og
+				out[n++] = 0.0f; // adry
+				out[n++] = 0.0f; // odry
+			}
+		}
+
+		void ParamsToVec(float* out) const
+		{
+			constexpr float eps = 1e-8f;
+			int n = 0;
+			for (int i = 0; i < NumLayers; ++i)
+			{
+				out[n++] = std::clamp(vx[i], eps, 1.0f - eps);
+				out[n++] = std::clamp(va[i], eps, 1.0f - eps);
+				out[n++] = std::clamp(vo[i], eps, 1.0f - eps);
+				out[n++] = std::clamp(vabsx[i], eps, 1.0f - eps);
+
+				out[n++] = gx[i];
+				out[n++] = ga[i];
+				out[n++] = go[i];
+
+				out[n++] = acxg[i];
+				out[n++] = acag[i];
+				out[n++] = acog[i];
+				out[n++] = acmixdc[i];
+
+				out[n++] = a1[i];
+				out[n++] = a2[i];
+				out[n++] = b1[i];
+				out[n++] = b2[i];
+
+				out[n++] = ag[i];
+				out[n++] = og[i];
+
+				out[n++] = adry[i];
+				out[n++] = odry[i];
+			}
+		}
+
+		void VecToParams(const float* in)
+		{
+			constexpr float eps = 1e-8f;
+			int n = 0;
+			for (int i = 0; i < NumLayers; ++i)
+			{
+				vx[i] = std::clamp(in[n++], eps, 1.0f - eps);
+				va[i] = std::clamp(in[n++], eps, 1.0f - eps);
+				vo[i] = std::clamp(in[n++], eps, 1.0f - eps);
+				vabsx[i] = std::clamp(in[n++], eps, 1.0f - eps);
+
+				gx[i] = in[n++];
+				ga[i] = in[n++];
+				go[i] = in[n++];
+
+				acxg[i] = in[n++];
+				acag[i] = in[n++];
+				acog[i] = in[n++];
+				acmixdc[i] = in[n++];
+
+				a1[i] = in[n++];
+				a2[i] = in[n++];
+				b1[i] = in[n++];
+				b2[i] = in[n++];
+
+				ag[i] = in[n++];
+				og[i] = in[n++];
+
+				adry[i] = in[n++];
+				odry[i] = in[n++];
+			}
+		}
+	};
+
+	class NLModelProcess
+	{
+	private:
+		float a = 0.0;
+		float o = 0.0;
+		float zx[NumLayers];
+		float za[NumLayers];
+		float zo[NumLayers];
+		float zabsx[NumLayers];
+	public:
+		NLModelProcess()
+		{
+			Init();
+		}
+
+		void Init()
+		{
+			a = o = 0;
+			for (auto& v : zx)v = 0;
+			for (auto& v : za)v = 0;
+			for (auto& v : zo)v = 0;
+			for (auto& v : zabsx)v = 0;
+		}
+
+		inline float Nonlinear(NLModelParams& p, float x, int layer)
+		{
+			float a1 = p.a1[layer];
+			float a2 = p.a2[layer];
+			float b1 = p.b1[layer];
+			float b2 = p.b2[layer];
+			float x2 = x * x;
+			float absx = std::abs(x);
+			return x * (1.0 + a1 * x + a2 * x2) / (1.0 + b1 * absx + b2 * x2);
+		}
+
+		void ProcessBlock(NLModelParams& p, const float* in, float* out, int NumSamples)
+		{
+			for (int i = 0; i < NumSamples; ++i)
+			{
+				float x = in[i];
+				float absx = std::abs(x);
+				float y = 0;
+				a = o = 0.0;//disable ring feedback
+				for (int j = 0; j < NumLayers; ++j)
+				{
+					zx[j] += p.vx[j] * (x - zx[j]);
+					za[j] += p.va[j] * (a - za[j]);
+					zo[j] += p.vo[j] * (o - zo[j]);
+					zabsx[j] += p.vabsx[j] * (absx - zabsx[j]);
+					float hx = zx[j] * p.gx[j];
+					float ha = za[j] * p.ga[j];
+					float ho = zo[j] * p.go[j];
+					float env = zabsx[j];
+					float mhx = hx * (1.0 + env * p.acxg[j]);//env mod hx gain
+					float mha = ha * (1.0 + env * p.acag[j]);//env mod ha gain
+					float mho = ho * (1.0 + env * p.acog[j]);//env mod ho gain
+					float mix = mhx + mha + mho + env * p.acmixdc[j];//env mod mix dc
+					a = a * p.adry[j] + mix;
+					o = o * p.odry[j] + Nonlinear(p, mix, j);
+					y += a * p.ag[j];
+					y += o * p.og[j];
+				}
+				out[i] = y;
+			}
+		}
+
+		constexpr static int GetTargetDelaySample()//训练最佳对齐
+		{
+			return 1;
+		}
+	};
+}
+namespace NLModelingStateCellHypLayers
+{
+	constexpr static int NumHypLayers = 2;
+	constexpr static int NumParams = NLModelingStateCell::NumParams * NumHypLayers;
+	struct NLModelParams
+	{
+		NLModelingStateCell::NLModelParams p[NumHypLayers];
+		static void InitVecDirect(float* out)
+		{
+			for (int i = 0; i < NumHypLayers; ++i)
+				NLModelingStateCell::NLModelParams::InitVecDirect(
+					out + NLModelingStateCell::NumParams * i);
+		}
+
+		void ParamsToVec(float* out) const
+		{
+			for (int i = 0; i < NumHypLayers; ++i)
+				p[i].ParamsToVec(out + NLModelingStateCell::NumParams * i);
+		}
+
+		void VecToParams(const float* in)
+		{
+			for (int i = 0; i < NumHypLayers; ++i)
+				p[i].VecToParams(in + NLModelingStateCell::NumParams * i);
+		}
+	};
+
+	class NLModelProcess
+	{
+	private:
+		NLModelingStateCell::NLModelProcess procs[NumHypLayers];
+	public:
+		NLModelProcess()
+		{
+			Init();
+		}
+		void Init()
+		{
+			for (int i = 0; i < NumHypLayers; ++i)
+				procs[i].Init();
+		}
+		void ProcessBlock(NLModelParams& p, const float* in, float* out, int NumSamples)
+		{
+			for (int i = 0; i < NumSamples; ++i)out[i] = in[i];
+			for (int i = 0; i < NumHypLayers; ++i)
+				procs[i].ProcessBlock(p.p[i], out, out, NumSamples);
+		}
+		constexpr static int GetTargetDelaySample()//训练最佳对齐
+		{
+			return NumHypLayers * NLModelingStateCell::NLModelProcess::GetTargetDelaySample();
 		}
 	};
 }
