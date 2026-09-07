@@ -545,7 +545,7 @@ namespace NLModeling3
 			}
 		}
 
-		static int GetTargetDelaySample()
+		constexpr static int GetTargetDelaySample()
 		{
 			return 1;
 		}
@@ -554,7 +554,8 @@ namespace NLModeling3
 
 namespace NLModelingGRU
 {
-	constexpr static int NumInputs = 1;
+	constexpr static int NumInputParams = 0;
+	constexpr static int NumInputs = NumInputParams + 1;
 	constexpr static int NumHiddens = 8;
 
 	constexpr static int NumParams =
@@ -689,14 +690,13 @@ namespace NLModelingGRU
 	class NLModelProcess
 	{
 	private:
-		std::array<float, NumInputs> inputp{ 0 };
+		std::array<float, NumInputParams + 1> inputp{ 0 };
 		std::array<float, NumHiddens> h{ 0 };
 		std::array<float, NumHiddens> tmp1{ 0 };
 		std::array<float, NumHiddens> tmp2{ 0 };
 		std::array<float, NumHiddens> s1o{ 0 };
 		std::array<float, NumHiddens> s2o{ 0 };
 		std::array<float, NumHiddens> tho{ 0 };
-		float xz1 = 0, xz2 = 0;
 		inline static float Tanh(float x)
 		{
 			//return tanhf(x);
@@ -710,11 +710,10 @@ namespace NLModelingGRU
 		void Init()
 		{
 			for (auto& v : h)v = 0;
-			xz1 = xz2 = 0;
 		}
 		void SetRuntimeParams(float* inputp)
 		{
-			for (int i = 0; i < NumInputs - 1; ++i)
+			for (int i = 0; i < NumInputParams; ++i)
 				this->inputp[i] = inputp[i];
 		}
 		template<int W, int H>
@@ -754,8 +753,9 @@ namespace NLModelingGRU
 			std::array<float, NumInputs> x;
 			for (int i = 0; i < NumSamples; ++i)
 			{
+				//input vec
 				x[0] = in[i];
-				for (int j = 1; j < NumInputs; ++j) x[j] = inputp[j - 1];
+				for (int j = 0; j < NumInputParams; ++j) x[j + 1] = inputp[j];
 				//r
 				MatMul<NumInputs, NumHiddens>(x, p.wr, tmp1);
 				MatMul<NumHiddens, NumHiddens>(h, p.ur, tmp2);
@@ -782,13 +782,10 @@ namespace NLModelingGRU
 				//out
 				float v = 0;
 				for (int n = 0; n < NumHiddens; ++n) v += h[n] * p.wo[n];
-
-				out[i] = v - xz2 + p.b;
-				xz2 = xz1;
-				xz1 = in[i];
+				out[i] = v + p.b;
 			}
 		}
-		int GetTargetDelaySample()
+		constexpr static int GetTargetDelaySample()
 		{
 			return 2;
 		}
