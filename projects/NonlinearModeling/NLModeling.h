@@ -1236,3 +1236,163 @@ namespace NLModelingStateCellHypLayers
 		}
 	};
 }
+
+namespace NLModelingEnvePass
+{
+	constexpr static int NumLayers = 16;
+	constexpr static int NumParams = NumLayers * 14;
+	struct NLModelParams
+	{
+		//lp
+		float v1[NumLayers];
+		float v2[NumLayers];
+		float v3[NumLayers];
+		float g1[NumLayers];
+		float g2[NumLayers];
+		float g3[NumLayers];
+		//nonlinear
+		float a1[NumLayers];
+		float a2[NumLayers];
+		float b1[NumLayers];
+		float b2[NumLayers];
+		//mix
+		float m1[NumLayers];
+		float mlp1[NumLayers];
+		float mdry[NumLayers];
+		float mwet[NumLayers];
+
+		static void InitVecDirect(float* out)
+		{
+			int n = 0;
+			for (int i = 0; i < NumLayers; ++i)
+			{
+				out[n++] = 1.0f; // v1
+				out[n++] = 1.0f; // v2
+				out[n++] = 1.0f; // v3
+
+				out[n++] = 1.0f; // g1
+				out[n++] = 0.0f; // g2
+				out[n++] = 0.0f; // g3
+
+				out[n++] = 0.0f; // a1
+				out[n++] = 0.0f; // a2
+				out[n++] = 0.0f; // b1
+				out[n++] = 0.0f; // b2
+
+				out[n++] = 1.0f; // m1
+				out[n++] = 1.0f; // mlp1
+				out[n++] = 0.0f; // mdry
+				out[n++] = 1.0f; // mwet
+			}
+		}
+
+		void ParamsToVec(float* out) const
+		{
+			int n = 0;
+			for (int i = 0; i < NumLayers; ++i)
+			{
+				out[n++] = v1[i];
+				out[n++] = v2[i];
+				out[n++] = v3[i];
+
+				out[n++] = g1[i];
+				out[n++] = g2[i];
+				out[n++] = g3[i];
+
+				out[n++] = a1[i];
+				out[n++] = a2[i];
+				out[n++] = b1[i];
+				out[n++] = b2[i];
+
+				out[n++] = m1[i];
+				out[n++] = mlp1[i];
+				out[n++] = mdry[i];
+				out[n++] = mwet[i];
+			}
+		}
+
+		void VecToParams(const float* in)
+		{
+			int n = 0;
+			for (int i = 0; i < NumLayers; ++i)
+			{
+				v1[i] = std::clamp(in[n++], 0.0f, 1.0f);
+				v2[i] = std::clamp(in[n++], 0.0f, 1.0f);
+				v3[i] = std::clamp(in[n++], 0.0f, 1.0f);
+
+				g1[i] = in[n++];
+				g2[i] = in[n++];
+				g3[i] = in[n++];
+
+				a1[i] = in[n++];
+				a2[i] = in[n++];
+				b1[i] = in[n++];
+				b2[i] = in[n++];
+
+				m1[i] = in[n++];
+				//m1[i] = std::clamp(in[n++], 0.0f, 1.0f);
+				mlp1[i] = in[n++];
+				mdry[i] = in[n++];
+				mwet[i] = in[n++];
+			}
+		}
+	};
+
+	class NLModelProcess
+	{
+	private:
+		float z1[NumLayers];
+		float z2[NumLayers];
+		float z3[NumLayers];
+	public:
+		NLModelProcess()
+		{
+			Init();
+		}
+		void Init()
+		{
+			for (auto& v : z1)v = 0;
+			for (auto& v : z2)v = 0;
+			for (auto& v : z3)v = 0;
+		}
+		static inline float Nonlinear(const NLModelParams& p, float x, int i)
+		{
+			float x2 = x * x;
+			float num = x * (1.0f + p.a1[i] * x + p.a2[i] * x2);
+			float den = 1.0f + p.b1[i] * std::abs(x) + p.b2[i] * x2;
+			return num / den;
+		}
+		inline std::tuple<float, float> ProcessCell(NLModelParams& p, float absx, float x, int i)
+		{
+			z1[i] += p.v1[i] * (x - z1[i]);
+			float lp1out = z1[i] * p.g1[i];
+			float mixabsx = absx + (std::abs(lp1out) - absx) * p.m1[i];
+			z2[i] += p.v2[i] * (mixabsx - z2[i]);
+			float lp2out = z2[i] * p.g2[i];
+			float mix2 = lp1out * p.mlp1[i] + lp2out;
+			float nl = Nonlinear(p, mix2, i);
+			z3[i] += p.v3[i] * (nl - z3[i]);
+			float wet = nl + z3[i] * p.g3[i];//de bias
+			float nextx = x * p.mdry[i] + wet * p.mwet[i];
+			return { mixabsx,nextx };
+		}
+		void ProcessBlock(NLModelParams& p, const float* in, float* out, int NumSamples)
+		{
+			for (int i = 0; i < NumSamples; ++i)
+			{
+				float absx = 0.0, x = in[i];
+				for (int j = 0; j < NumLayers; ++j)
+				{
+					auto [nextabsx, nextx] = ProcessCell(p, absx, x, j);
+					absx = nextabsx;
+					x = nextx;
+				}
+				out[i] = x;
+			}
+		}
+		constexpr static int GetTargetDelaySample()//ÑµÁ·×î¼Ñ¶ÔÆë
+		{
+			return 1;
+		}
+	};
+}

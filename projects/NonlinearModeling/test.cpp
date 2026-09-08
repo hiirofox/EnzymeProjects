@@ -62,10 +62,10 @@ void FFT(float* re, float* im, int inv)
 		}
 	}
 }
-#define SelectedNL NLModeling4
+#define SelectedNL NLModeling3
 
 constexpr static int NumParams = SelectedNL::NumParams;
-constexpr static int bootSize = 48000 / 20;//留一些采样供响应稳定
+constexpr static int bootSize = 48000 / 480;//留一些采样供响应稳定
 constexpr static int delaySample = SelectedNL::NLModelProcess::GetTargetDelaySample();
 //延迟一些采样让模型好优化，而不是学预测
 //典型值：灰盒1sample，gru 2sample
@@ -229,7 +229,7 @@ std::tuple<float, float, float, float > get_gradient(const float* params, float*
 }
 
 const int NumTasks = 12;
-int numTrainBlocks = 100;
+int numTrainBlocks = 1;
 std::vector<int> blockStart;
 std::vector<int> blockLen;
 class ADThreadPool
@@ -324,22 +324,24 @@ float bestLoss = 999999999;
 float smoothLoss = 200.0;
 float bestParams[SelectedNL::NumParams];
 int newScoreFlag = 0;
-
+std::string saveParamsFile = "";
 void SaveParams(float* params, int NumParams)
 {
-	FILE* pf = fopen("bestloss.txt", "w");
+	FILE* pf = fopen(saveParamsFile.c_str(), "w");
 	fprintf(pf, "%d\n", NumParams);
 	for (int i = 0; i < NumParams; ++i)
 		fprintf(pf, "%.8f,", params[i]);
 	fclose(pf);
 }
-void ReadParams(float* params, int NumParams)
+int ReadParams(float* params, int NumParams)
 {
-	FILE* pf = fopen("bestloss.txt", "r");
+	FILE* pf = fopen(saveParamsFile.c_str(), "r");
+	if (!pf)return 0;
 	int n, tmp;
 	fscanf(pf, "%d", &n);
 	for (int i = 0; i < NumParams; ++i) fscanf(pf, "%f,", &params[i]);
 	fclose(pf);
+	return 1;
 }
 double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data)
 {
@@ -489,13 +491,16 @@ int main()
 
 	//std::string root = "/home/hiirofox/TestEnzyme/projects/NonlinearModeling/builds/";
 	std::string root = "";
-	wr.OpenWAV(root + "input.wav");
+	wr.OpenWAV(root + "nd-input.wav");//input.wav
+	std::string target = "nd-d10-t10";//target
 	BatchSampleLen = wr.GetNumSamples();
 	printf("wav NumSamples:%d\n", BatchSampleLen);
 	testX.resize(BatchSampleLen);
 	targetY.resize(BatchSampleLen);
 	wr.ReadBlockMono(testX.data(), BatchSampleLen);
-	wr.OpenWAV(root + "target.wav");
+	wr.OpenWAV(root + target + ".wav");
+	saveParamsFile = "bestloss-nl3-" + target + ".txt";
+
 	wr.ReadBlockMono(targetY.data(), BatchSampleLen);
 	float xrms = 0;
 	float yrms = 0;
@@ -515,10 +520,11 @@ int main()
 	printf("boot sample:%d(%.2fs)\n", bootSize, (float)bootSize / 48000.0);
 	printf("read ok. xrms=%.5f yrms=%.5f\n", xrms, yrms);
 
+	//open file
 	float directParams[NumParams];
-	//SelectedNL::NLModelParams::InitVecRandom2(directParams);
-	//SelectedNL::NLModelParams::InitVecDirect(directParams);
-	ReadParams(directParams, NumParams);
+	int result = ReadParams(directParams, NumParams);
+	if (!result)SelectedNL::NLModelParams::InitVecDirect(directParams);
+
 	arma::vec x(NumParams);
 	for (int i = 0; i < NumParams; ++i)
 		bestParams[i] = x[i] = directParams[i];
@@ -531,23 +537,23 @@ int main()
 	adam.Beta1() = 0.9;
 	adam.Beta2() = 0.999;
 	adam.Epsilon() = 1e-8;
-	adam.MaxIterations() = 0;
+	adam.MaxIterations() = 1;
 	adam.Tolerance() = 0.0;
 	adam.Shuffle() = false;
 	ens::L_BFGS lbfgs;
-	lbfgs.MaxIterations() = 300;
+	lbfgs.MaxIterations() = 10000;
 	for (;;)
 	{
 		float adamloss = bestLoss;
 		iter = 0;
 		adam.Optimize(objectiveFunction, x);
 		for (int i = 0; i < NumParams; ++i) x[i] = bestParams[i];
-		printf("adam loss: %.3f->%.3f (%.3f%%)\n", adamloss, bestLoss, (adamloss - bestLoss) / adamloss*100.0);
-		
+		printf("adam loss: %.3f->%.3f (%.3f%%)\n", adamloss, bestLoss, (adamloss - bestLoss) / adamloss * 100.0);
+
 		float lbfgsloss = bestLoss;
 		iter = 0;
 		lbfgs.Optimize(objectiveFunction, x);
 		for (int i = 0; i < NumParams; ++i) x[i] = bestParams[i];
-		printf("adam loss: %.3f->%.3f (%.3f%%)\n", lbfgsloss, bestLoss, (lbfgsloss - bestLoss) / lbfgsloss * 100.0);
+		printf("lbfgs loss: %.3f->%.3f (%.3f%%)\n", lbfgsloss, bestLoss, (lbfgsloss - bestLoss) / lbfgsloss * 100.0);
 	}
 }
