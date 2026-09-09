@@ -553,85 +553,98 @@ int main()
 	//std::string root = "/home/hiirofox/TestEnzyme/projects/NonlinearModeling/builds/";
 	std::string root = "";
 
-	FILE* ptasks = fopen((root + "tasks.txt").c_str(), "r");
-	int tasks = 0, maxiter = 1;
-	float minloss = 0;
-	std::vector<std::string> targetsName;
-	fscanf(ptasks, "%d\n", &tasks);
-	fscanf(ptasks, "loss<%f\n", &minloss);
-	fscanf(ptasks, "iter=%d\n", &maxiter);
-	targetsName.resize(tasks);
-	for (int i = 0; i < tasks; ++i)
-	{
-		char tmp[256];
-		fgets(tmp, 256, ptasks);
-		targetsName[i] = tmp;
+	std::ifstream f(root + "tasks.txt");
+	int tasks = 0, maxiter = 1; float minloss = 0;
+	f >> tasks >> minloss >> maxiter; f.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+	std::vector<std::string> targetsName(tasks);
+	std::vector<int> okflags(tasks, 0);
+	printf("tasks:%d\nMaxIter:%d\nminLoss:%.5f\ntargets:\n", tasks, maxiter, minloss);
+	for (int i = 0; i < tasks; ++i) {
+		std::getline(f, targetsName[i]);
+		if (!targetsName[i].empty() && targetsName[i].back() == '\r')
+			targetsName[i].pop_back();
+		std::cout << "\"" << targetsName[i] << "\"\n";
 	}
-	fclose(ptasks);
 
-	wr.OpenWAV(root + "nd-input.wav");//input.wav
-	std::string target = "nd-d10-t05";//target
-	BatchSampleLen = wr.GetNumSamples();
-	printf("wav NumSamples:%d\n", BatchSampleLen);
-	testX.resize(BatchSampleLen);
-	targetY.resize(BatchSampleLen);
-	wr.ReadBlockMono(testX.data(), BatchSampleLen);
-	wr.OpenWAV(root + target + ".wav");
-	saveParamsFile = "bestloss-nl3-" + target + ".txt";
+	printf("\n---TASKS START---\n");
 
-	wr.ReadBlockMono(targetY.data(), BatchSampleLen);
-	float xrms = 0;
-	float yrms = 0;
-	float yAvgEnergy = 0;
-	for (int i = 0; i < BatchSampleLen; ++i)
+	for (;;) for (int taskid = 0; taskid < tasks; ++taskid)
 	{
-		testX[i] *= 1.0;
-		targetY[i] *= 1.0 / 1.414213562;
-		xrms += testX[i] * testX[i] * 0.01;
-		yrms += targetY[i] * targetY[i] * 0.01;
-	}
-	yAvgEnergy = yrms / BatchSampleLen / 0.0001;
-	SegmentBlock(testX, BatchSampleLen, blockStart, blockLen);
+		if (okflags[taskid])continue;
 
-	xrms = sqrtf(xrms / 0.0001);
-	yrms = sqrtf(yrms / 0.0001);
-	printf("boot sample:%d(%.2fs)\n", bootSize, (float)bootSize / 48000.0);
-	printf("read ok. xrms=%.5f yrms=%.5f\n", xrms, yrms);
+		wr.OpenWAV(root + "nd-input.wav");//input.wav
+		//std::string target = "nd-d10-t05";//target
+		std::string target = targetsName[taskid];
+		BatchSampleLen = wr.GetNumSamples();
+		printf("wav NumSamples:%d\n", BatchSampleLen);
+		testX.resize(BatchSampleLen);
+		targetY.resize(BatchSampleLen);
+		wr.ReadBlockMono(testX.data(), BatchSampleLen);
+		wr.OpenWAV(root + target + ".wav");
+		saveParamsFile = "bestloss-nl3-" + target + ".txt";
 
-	//open file
-	float directParams[NumParams];
-	int result = ReadParams(directParams, NumParams);
-	if (!result)SelectedNL::NLModelParams::InitVecDirect(directParams);
+		wr.ReadBlockMono(targetY.data(), BatchSampleLen);
+		float xrms = 0;
+		float yrms = 0;
+		float yAvgEnergy = 0;
+		for (int i = 0; i < BatchSampleLen; ++i)
+		{
+			testX[i] *= 1.0;
+			targetY[i] *= 1.0 / 1.414213562;
+			xrms += testX[i] * testX[i] * 0.01;
+			yrms += targetY[i] * targetY[i] * 0.01;
+		}
+		yAvgEnergy = yrms / BatchSampleLen / 0.0001;
+		SegmentBlock(testX, BatchSampleLen, blockStart, blockLen);
 
-	arma::vec x(NumParams);
-	for (int i = 0; i < NumParams; ++i)
-		bestParams[i] = x[i] = directParams[i];
+		xrms = sqrtf(xrms / 0.0001);
+		yrms = sqrtf(yrms / 0.0001);
+		printf("boot sample:%d(%.2fs)\n", bootSize, (float)bootSize / 48000.0);
+		printf("read ok. xrms=%.5f yrms=%.5f\n", xrms, yrms);
 
-	EnsmallenObjective objectiveFunction;
-	float lrstart = 0.001;
-	ens::Adam adam;
-	adam.StepSize() = lrstart;
-	adam.BatchSize() = 1;
-	adam.Beta1() = 0.9;
-	adam.Beta2() = 0.999;
-	adam.Epsilon() = 1e-8;
-	adam.MaxIterations() = 1;
-	adam.Tolerance() = 0.0;
-	adam.Shuffle() = false;
-	ens::L_BFGS lbfgs;
-	lbfgs.MaxIterations() = 10000;
-	for (;;)
-	{
+		//open file
+		float directParams[NumParams];
+		int result = ReadParams(directParams, NumParams);
+		if (!result)SelectedNL::NLModelParams::InitVecDirect(directParams);
+
+		arma::vec x(NumParams);
+		for (int i = 0; i < NumParams; ++i)
+			bestParams[i] = x[i] = directParams[i];
+
+		EnsmallenObjective objectiveFunction;
+		float lrstart = 0.001;
+		ens::Adam adam;
+		adam.StepSize() = lrstart;
+		adam.BatchSize() = 1;
+		adam.Beta1() = 0.9;
+		adam.Beta2() = 0.999;
+		adam.Epsilon() = 1e-8;
+		adam.MaxIterations() = maxiter;
+		adam.Tolerance() = 0.0;
+		adam.Shuffle() = false;
+		ens::L_BFGS lbfgs;
+		lbfgs.MaxIterations() = maxiter;
+
+		/*
 		float adamloss = bestLoss;
 		iter = 0;
 		adam.Optimize(objectiveFunction, x);
 		for (int i = 0; i < NumParams; ++i) x[i] = bestParams[i];
 		printf("adam loss: %.3f->%.3f (%.3f%%)\n", adamloss, bestLoss, (adamloss - bestLoss) / adamloss * 100.0);
+		*/
 
 		float lbfgsloss = bestLoss;
 		iter = 0;
 		lbfgs.Optimize(objectiveFunction, x);
 		for (int i = 0; i < NumParams; ++i) x[i] = bestParams[i];
 		printf("lbfgs loss: %.3f->%.3f (%.3f%%)\n", lbfgsloss, bestLoss, (lbfgsloss - bestLoss) / lbfgsloss * 100.0);
+
+		if (bestLoss < minloss) okflags[taskid] = 1;
+		int allokflag = 1;
+		for (int i = 0; i < tasks; ++i)
+			if (!okflags[i])allokflag = 0;
+		if (allokflag) goto done;
 	}
+done:
+	//goto有什么不好的
 }
