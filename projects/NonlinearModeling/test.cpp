@@ -87,7 +87,8 @@ void loss_wrapper(
 	float* specPeak,
 	float* outRMS,
 	float* outMax,
-	float* outAlias)
+	float* outAlias,
+	float* outStruct)
 {
 	SelectedNL::NLModelParams& nlParams = *new SelectedNL::NLModelParams;
 	SelectedNL::NLModelProcess& nlproc = *new SelectedNL::NLModelProcess;
@@ -219,10 +220,16 @@ void loss_wrapper(
 	if (cleanEnergy < 0)cleanEnergy = 0;
 	float aliasloss = aliasEnergy / (cleanEnergy + 1e-4) * 100.0;
 
+	float structloss = nlproc.GetSructureLoss(nlParams);
+
 	//loss eval
 	//float loss = rms * 50.0 + timeSoftPeak * 100.0 + specSoftPeak * 50.0;
 	//float loss = rms * 10.0 + timeSoftPeak * 10.0 + specSoftPeak * 180.0;
-	float loss = rms * 10.0 + timeSoftPeak * 10.0 + aliasloss * 10.0 + specSoftPeak * 170.0;
+	float loss = rms * 10.0 +
+		timeSoftPeak * 10.0 +
+		aliasloss * 10.0 +
+		specSoftPeak * 170.0 +
+		structloss * 10.0;
 	//float loss = specSoftPeak * 200.0;
 	//float loss = timeSoftPeak * 200.0;
 	//float loss = aliasloss * 200.0;
@@ -232,9 +239,10 @@ void loss_wrapper(
 	*outRMS = rms;
 	*outMax = max;
 	*outAlias = aliasloss;
+	*outStruct = structloss;
 }
 
-std::tuple<float, float, float, float, float > get_gradient(const float* params, float* grad, int n,
+std::tuple<float, float, float, float, float, float > get_gradient(const float* params, float* grad, int n,
 	int startPos, int batchLen)
 {
 	std::fill(grad, grad + n, 0.0f);
@@ -244,12 +252,14 @@ std::tuple<float, float, float, float, float > get_gradient(const float* params,
 	float rmsValue = 0.0f;
 	float maxValue = 0.0f;
 	float aliasValue = 0.0f;
+	float structValue = 0.0f;
 
 	float dLoss = 1.0f;
-	float dSpecPeak = 1.0f;
+	float dSpecPeak = 0.0f;
 	float dRMS = 0.0f;
 	float dMax = 0.0f;
 	float dAlias = 0.0f;
+	float dStruct = 0.0f;
 	__enzyme_autodiff(
 		(void*)loss_wrapper,
 		enzyme_dup, params, grad,
@@ -262,14 +272,16 @@ std::tuple<float, float, float, float, float > get_gradient(const float* params,
 		enzyme_dup, &specPeakValue, &dSpecPeak,
 		enzyme_dup, &rmsValue, &dRMS,
 		enzyme_dup, &maxValue, &dMax,
-		enzyme_dup, &aliasValue, &dAlias
+		enzyme_dup, &aliasValue, &dAlias,
+		enzyme_dup, &structValue, &dStruct
 	);
 	return {
 		lossValue,
 		specPeakValue,
 		rmsValue,
 		maxValue,
-		aliasValue
+		aliasValue,
+		structValue
 	};
 }
 
@@ -280,7 +292,7 @@ std::vector<int> blockLen;
 class ADThreadPool
 {
 public:
-	using Metrics = std::tuple<float, float, float, float, float>;
+	using Metrics = std::tuple<float, float, float, float, float, float>;
 	struct TaskResult
 	{
 		Metrics metrics;
@@ -396,6 +408,7 @@ double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data
 	float sumRms = 0.0f;
 	float sumMax = 0.0f;
 	float sumAlias = 0.0f;
+	float sumStruct = 0.0f;
 	Eigen::VectorXf grad = Eigen::VectorXf::Zero(NumParams);
 
 	/*
@@ -405,7 +418,7 @@ double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data
 	for (int i = 0; i < NumTasks; ++i)
 	{
 		auto result = adPool.GetResult(i);
-		auto [loss, specPeak, rms, max,alias] = result.metrics;
+		auto [loss, specPeak, rms, max,alias,struct] = result.metrics;
 		sumLoss += loss;
 		sumSpecPeak += specPeak;
 		sumRms += rms;
@@ -421,7 +434,7 @@ double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data
 	*/
 	//int selectBlockID = rand() % numTrainBlocks;
 	int selectBlockID = 0;
-	auto [loss, specPeak, rmsValue, maxValue, aliasValue] =
+	auto [loss, specPeak, rmsValue, maxValue, aliasValue, structValue] =
 		get_gradient(params.data(), grad.data(), NumParams, blockStart[selectBlockID], blockLen[selectBlockID]);
 
 	//if (iter == 0)smoothLoss = loss;
@@ -433,6 +446,7 @@ double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data
 	sumRms = rmsValue;
 	sumMax = maxValue;
 	sumAlias = aliasValue;
+	sumStruct = structValue;
 	if (grad_out)
 		*grad_out = grad.cast<double>();
 
@@ -445,8 +459,8 @@ double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data
 	}
 	if (iter % 5 == 0)
 	{
-		printf("Iter%5d loss=%03.3f specPeak=%03.3f rms=%03.3f max=%03.3f alias=%03.3f %s\n",
-			iter, sumLoss, sumSpecPeak, sumRms, sumMax, sumAlias, newScoreFlag ? "(NEW!)" : "");
+		printf("Iter%5d loss=%03.3f spec=%03.3f rms=%03.3f max=%03.3f alias=%03.3f struct:%03.3f %s\n",
+			iter, sumLoss, sumSpecPeak, sumRms, sumMax, sumAlias, sumStruct, newScoreFlag ? "(NEW!)" : "");
 		if (newScoreFlag)
 		{
 			SaveParams(params.data(), SelectedNL::NumParams);
@@ -538,8 +552,25 @@ int main()
 
 	//std::string root = "/home/hiirofox/TestEnzyme/projects/NonlinearModeling/builds/";
 	std::string root = "";
+
+	FILE* ptasks = fopen((root + "tasks.txt").c_str(), "r");
+	int tasks = 0, maxiter = 1;
+	float minloss = 0;
+	std::vector<std::string> targetsName;
+	fscanf(ptasks, "%d\n", &tasks);
+	fscanf(ptasks, "loss<%f\n", &minloss);
+	fscanf(ptasks, "iter=%d\n", &maxiter);
+	targetsName.resize(tasks);
+	for (int i = 0; i < tasks; ++i)
+	{
+		char tmp[256];
+		fgets(tmp, 256, ptasks);
+		targetsName[i] = tmp;
+	}
+	fclose(ptasks);
+
 	wr.OpenWAV(root + "nd-input.wav");//input.wav
-	std::string target = "nd-d10-t10";//target
+	std::string target = "nd-d10-t05";//target
 	BatchSampleLen = wr.GetNumSamples();
 	printf("wav NumSamples:%d\n", BatchSampleLen);
 	testX.resize(BatchSampleLen);

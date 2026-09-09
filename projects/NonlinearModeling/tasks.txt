@@ -1,0 +1,12 @@
+9
+loss<5.0
+iter=4000
+nd-d00-t00
+nd-d00-t05
+nd-d00-t10
+nd-d05-t00
+nd-d05-t05
+nd-d05-t10
+nd-d10-t00
+nd-d10-t05
+nd-d10-t10

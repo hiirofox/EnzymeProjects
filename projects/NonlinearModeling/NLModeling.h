@@ -534,7 +534,7 @@ namespace NLModeling3
 			return x * p.gdry[layer] + nlo * p.gnlout[layer];
 		}
 
-		void ProcessBlock(NLModelParams& p, const float* in, float* out, int NumSamples)
+		void ProcessBlock(const NLModelParams& p, const float* in, float* out, int NumSamples)
 		{
 			for (int i = 0; i < NumSamples; ++i)
 			{
@@ -543,6 +543,51 @@ namespace NLModeling3
 					x = ProcessCell(x, p, layer);
 				out[i] = x;
 			}
+		}
+
+		float GetSructureLoss(const NLModelParams& p)
+		{
+			float loss = 0.0f;
+
+			for (int layer = 0; layer < NumLayers; ++layer)
+			{
+				auto pos = NumLayers > 1
+					? layer * 2.0f / (NumLayers - 1) - 1.0f
+					: 0.0f;
+				auto w = 0.08f + 0.92f * pos * pos;
+
+				float linearLoss = 0.0f;
+				for (int i = 0; i < FiltOrder; ++i)
+				{
+					linearLoss += p.k[layer][i] * p.k[layer][i];
+					linearLoss += p.gf[layer][i] * p.gf[layer][i];
+				}
+				auto dgfx = p.gfx[layer] - 1.0f;
+				linearLoss += dgfx * dgfx;
+				linearLoss /= FiltOrder * 2 + 1;
+
+				auto da2 = p.a2[layer] - 1.0f;
+				auto db1 = p.b1[layer] - 1.0f;
+				float nonlinearLoss =
+					p.a1[layer] * p.a1[layer] +
+					da2 * da2 +
+					p.a3[layer] * p.a3[layer] +
+					db1 * db1 +
+					p.b2[layer] * p.b2[layer];
+				nonlinearLoss *= 0.2f;
+
+				auto dgnlin = p.gnlin[layer] - 1.0f;
+				auto dgnlout = p.gnlout[layer] - 1.0f;
+				float routingLoss =
+					p.gdry[layer] * p.gdry[layer] +
+					dgnlin * dgnlin +
+					dgnlout * dgnlout;
+				routingLoss /= 3.0f;
+
+				loss += w * (linearLoss + nonlinearLoss + routingLoss);
+			}
+
+			return loss / NumLayers;
 		}
 
 		constexpr static int GetTargetDelaySample()
