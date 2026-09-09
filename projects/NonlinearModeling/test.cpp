@@ -75,6 +75,8 @@ std::vector<float> testX, targetY;
 
 constexpr static int WindowSize = 1024;
 constexpr static int HopSize = 512;
+constexpr static int AliasTestSize = 64;
+
 float window[WindowSize];//Harris-Blackman
 void loss_wrapper(
 	float* params,
@@ -84,7 +86,8 @@ void loss_wrapper(
 	float* outLoss,
 	float* specPeak,
 	float* outRMS,
-	float* outMax)
+	float* outMax,
+	float* outAlias)
 {
 	SelectedNL::NLModelParams& nlParams = *new SelectedNL::NLModelParams;
 	SelectedNL::NLModelProcess& nlproc = *new SelectedNL::NLModelProcess;
@@ -177,23 +180,61 @@ void loss_wrapper(
 	constexpr float eps = 1e-3f;
 	const float rms = errRMS / (targetRMS + eps);
 	const float max = errMax / (targetMax + eps);
-
 	const float errR8 = powf(err8, 1.0 / 8.0);
 	const float targetR8 = powf(target8, 1.0 / 8.0);
 	const float timeSoftPeak = errR8 / (targetR8 + eps);
 
+	//aliasing analyze
+	float aTotalEnergy = 0;
+	float aliasEnergy = 0;
+	for (int i = 2; i < AliasTestSize / 2 - 1; ++i)
+	{
+		nlproc.Init();
+		for (int j = 0; j < AliasTestSize; ++j)
+		{
+			float x = (float)j / AliasTestSize;
+			//float w = 0.5 - 0.5 * std::cos(2.0 * 3.1415926535 * x);
+			float w = 1.0;
+			tmpre2[j] = std::sin(2.0 * 3.1415926535 * x * i) * w * 0.25;
+		}
+		nlproc.ProcessBlock(nlParams, tmpre2, tmpre1, AliasTestSize);//boot
+		nlproc.ProcessBlock(nlParams, tmpre2, tmpre1, AliasTestSize);
+		for (int j = 0; j < AliasTestSize; ++j)
+		{
+			float x = (float)j / AliasTestSize;
+			//float w = 0.5 - 0.5 * std::cos(2.0 * 3.1415926535 * x);
+			float w = 1.0;
+			tmpre1[j] *= w;
+			tmpim1[j] = 0;
+		}
+		FFT<AliasTestSize>(tmpre1, tmpim1, 0);
+		for (int j = 1; j < AliasTestSize / 2; ++j)
+		{
+			float mag = tmpre1[j] * tmpre1[j] + tmpim1[j] * tmpim1[j];
+			aTotalEnergy += mag;
+			if (j < i) aliasEnergy += mag;
+		}
+	}
+	float cleanEnergy = aTotalEnergy - aliasEnergy;
+	if (cleanEnergy < 0)cleanEnergy = 0;
+	float aliasloss = aliasEnergy / (cleanEnergy + 1e-4) * 100.0;
+
+	//loss eval
 	//float loss = rms * 50.0 + timeSoftPeak * 100.0 + specSoftPeak * 50.0;
-	float loss = rms * 10.0 + timeSoftPeak * 10.0 + specSoftPeak * 180.0;
+	//float loss = rms * 10.0 + timeSoftPeak * 10.0 + specSoftPeak * 180.0;
+	float loss = rms * 10.0 + timeSoftPeak * 10.0 + aliasloss * 10.0 + specSoftPeak * 170.0;
 	//float loss = specSoftPeak * 200.0;
 	//float loss = timeSoftPeak * 200.0;
+	//float loss = aliasloss * 200.0;
 
 	*outLoss = loss;
 	*specPeak = specSoftPeak;
 	*outRMS = rms;
 	*outMax = max;
+	*outAlias = aliasloss;
 }
 
-std::tuple<float, float, float, float > get_gradient(const float* params, float* grad, int n,
+std::tuple<float, float, float, float, float > get_gradient(const float* params, float* grad, int n,
 	int startPos, int batchLen)
 {
 	std::fill(grad, grad + n, 0.0f);
@@ -202,11 +243,13 @@ std::tuple<float, float, float, float > get_gradient(const float* params, float*
 	float specPeakValue = 0.0f;
 	float rmsValue = 0.0f;
 	float maxValue = 0.0f;
+	float aliasValue = 0.0f;
 
 	float dLoss = 1.0f;
 	float dSpecPeak = 1.0f;
 	float dRMS = 0.0f;
 	float dMax = 0.0f;
+	float dAlias = 0.0f;
 	__enzyme_autodiff(
 		(void*)loss_wrapper,
 		enzyme_dup, params, grad,
@@ -218,13 +261,15 @@ std::tuple<float, float, float, float > get_gradient(const float* params, float*
 		enzyme_dup, &lossValue, &dLoss,
 		enzyme_dup, &specPeakValue, &dSpecPeak,
 		enzyme_dup, &rmsValue, &dRMS,
-		enzyme_dup, &maxValue, &dMax
+		enzyme_dup, &maxValue, &dMax,
+		enzyme_dup, &aliasValue, &dAlias
 	);
 	return {
 		lossValue,
 		specPeakValue,
 		rmsValue,
-		maxValue
+		maxValue,
+		aliasValue
 	};
 }
 
@@ -235,7 +280,7 @@ std::vector<int> blockLen;
 class ADThreadPool
 {
 public:
-	using Metrics = std::tuple<float, float, float, float>;
+	using Metrics = std::tuple<float, float, float, float, float>;
 	struct TaskResult
 	{
 		Metrics metrics;
@@ -350,6 +395,7 @@ double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data
 	float sumSpecPeak = 0.0f;
 	float sumRms = 0.0f;
 	float sumMax = 0.0f;
+	float sumAlias = 0.0f;
 	Eigen::VectorXf grad = Eigen::VectorXf::Zero(NumParams);
 
 	/*
@@ -359,11 +405,12 @@ double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data
 	for (int i = 0; i < NumTasks; ++i)
 	{
 		auto result = adPool.GetResult(i);
-		auto [loss, specPeak, rms, max] = result.metrics;
+		auto [loss, specPeak, rms, max,alias] = result.metrics;
 		sumLoss += loss;
 		sumSpecPeak += specPeak;
 		sumRms += rms;
 		sumMax += max;
+		sumAlias += alias;
 		grad += result.grad;
 	}
 	sumLoss /= NumTasks;
@@ -374,7 +421,7 @@ double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data
 	*/
 	//int selectBlockID = rand() % numTrainBlocks;
 	int selectBlockID = 0;
-	auto [loss, specPeak, rmsValue, maxValue] =
+	auto [loss, specPeak, rmsValue, maxValue, aliasValue] =
 		get_gradient(params.data(), grad.data(), NumParams, blockStart[selectBlockID], blockLen[selectBlockID]);
 
 	//if (iter == 0)smoothLoss = loss;
@@ -385,7 +432,7 @@ double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data
 	sumSpecPeak = specPeak;
 	sumRms = rmsValue;
 	sumMax = maxValue;
-
+	sumAlias = aliasValue;
 	if (grad_out)
 		*grad_out = grad.cast<double>();
 
@@ -398,8 +445,8 @@ double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data
 	}
 	if (iter % 5 == 0)
 	{
-		printf("Iter%5d loss=%03.3f specPeak=%03.3f rms=%03.3f max=%03.3f %s\n",
-			iter, sumLoss, sumSpecPeak, sumRms, sumMax, newScoreFlag ? "(NEW!)" : "");
+		printf("Iter%5d loss=%03.3f specPeak=%03.3f rms=%03.3f max=%03.3f alias=%03.3f %s\n",
+			iter, sumLoss, sumSpecPeak, sumRms, sumMax, sumAlias, newScoreFlag ? "(NEW!)" : "");
 		if (newScoreFlag)
 		{
 			SaveParams(params.data(), SelectedNL::NumParams);
@@ -507,8 +554,8 @@ int main()
 	float yAvgEnergy = 0;
 	for (int i = 0; i < BatchSampleLen; ++i)
 	{
-		//testX[i] *= 0.1;
-		//targetY[i] *= 0.1;
+		testX[i] *= 1.0;
+		targetY[i] *= 1.0 / 1.414213562;
 		xrms += testX[i] * testX[i] * 0.01;
 		yrms += targetY[i] * targetY[i] * 0.01;
 	}
