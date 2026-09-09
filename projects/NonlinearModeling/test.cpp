@@ -382,20 +382,20 @@ float smoothLoss = 200.0;
 float bestParams[SelectedNL::NumParams];
 int newScoreFlag = 0;
 std::string saveParamsFile = "";
-void SaveParams(float* params, int NumParams)
+void SaveParams(float* params, float& loss, int NumParams)
 {
 	FILE* pf = fopen(saveParamsFile.c_str(), "w");
-	fprintf(pf, "%d\n", NumParams);
+	fprintf(pf, "%d %.5f\n", NumParams, loss);
 	for (int i = 0; i < NumParams; ++i)
 		fprintf(pf, "%.8f,", params[i]);
 	fclose(pf);
 }
-int ReadParams(float* params, int NumParams)
+int ReadParams(float* params, float& loss, int NumParams)
 {
 	FILE* pf = fopen(saveParamsFile.c_str(), "r");
 	if (!pf)return 0;
 	int n, tmp;
-	fscanf(pf, "%d", &n);
+	fscanf(pf, "%d %f", &n, &loss);
 	for (int i = 0; i < NumParams; ++i) fscanf(pf, "%f,", &params[i]);
 	fclose(pf);
 	return 1;
@@ -463,7 +463,7 @@ double objective(const Eigen::VectorXd& x, Eigen::VectorXd* grad_out, void* data
 			iter, sumLoss, sumSpecPeak, sumRms, sumMax, sumAlias, sumStruct, newScoreFlag ? "(NEW!)" : "");
 		if (newScoreFlag)
 		{
-			SaveParams(params.data(), SelectedNL::NumParams);
+			SaveParams(bestParams, bestLoss, SelectedNL::NumParams);
 		}
 		newScoreFlag = 0;
 	}
@@ -566,11 +566,17 @@ int main()
 		std::cout << "\"" << targetsName[i] << "\"\n";
 	}
 
-	printf("\n---TASKS START---\n");
+	printf("\n---TASKS START---\n\n");
 
 	for (;;) for (int taskid = 0; taskid < tasks; ++taskid)
 	{
+		int allokflag = 1;
+		for (int i = 0; i < tasks; ++i)
+			if (!okflags[i])allokflag = 0;
+		if (allokflag) goto done;
 		if (okflags[taskid])continue;
+
+		std::cout << targetsName[taskid] << "\n";
 
 		wr.OpenWAV(root + "nd-input.wav");//input.wav
 		//std::string target = "nd-d10-t05";//target
@@ -604,7 +610,13 @@ int main()
 
 		//open file
 		float directParams[NumParams];
-		int result = ReadParams(directParams, NumParams);
+		float fileParamsLoss = 9999999999;
+		int result = ReadParams(directParams, fileParamsLoss, NumParams);
+		if (result && fileParamsLoss < minloss)
+		{
+			okflags[taskid] = 1;
+			continue;
+		}
 		if (!result)SelectedNL::NLModelParams::InitVecDirect(directParams);
 
 		arma::vec x(NumParams);
@@ -612,7 +624,7 @@ int main()
 			bestParams[i] = x[i] = directParams[i];
 
 		EnsmallenObjective objectiveFunction;
-		float lrstart = 0.001;
+		float lrstart = 0.0005;
 		ens::Adam adam;
 		adam.StepSize() = lrstart;
 		adam.BatchSize() = 1;
@@ -625,26 +637,24 @@ int main()
 		ens::L_BFGS lbfgs;
 		lbfgs.MaxIterations() = maxiter;
 
-		/*
+		bestLoss = 999999999;
+
+		
 		float adamloss = bestLoss;
 		iter = 0;
 		adam.Optimize(objectiveFunction, x);
 		for (int i = 0; i < NumParams; ++i) x[i] = bestParams[i];
 		printf("adam loss: %.3f->%.3f (%.3f%%)\n", adamloss, bestLoss, (adamloss - bestLoss) / adamloss * 100.0);
-		*/
-
+		
+		/*
 		float lbfgsloss = bestLoss;
 		iter = 0;
 		lbfgs.Optimize(objectiveFunction, x);
 		for (int i = 0; i < NumParams; ++i) x[i] = bestParams[i];
 		printf("lbfgs loss: %.3f->%.3f (%.3f%%)\n", lbfgsloss, bestLoss, (lbfgsloss - bestLoss) / lbfgsloss * 100.0);
+		*/
 
 		if (bestLoss < minloss) okflags[taskid] = 1;
-		int allokflag = 1;
-		for (int i = 0; i < tasks; ++i)
-			if (!okflags[i])allokflag = 0;
-		if (allokflag) goto done;
 	}
 done:
-	//goto有什么不好的
 }
